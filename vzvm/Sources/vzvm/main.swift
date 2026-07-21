@@ -1,7 +1,7 @@
 import Foundation
 import Virtualization
 
-let version = "0.1.0"
+let version = "1.0.0"
 
 let usage = """
   vzvm \(version)
