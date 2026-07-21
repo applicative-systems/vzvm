@@ -55,7 +55,7 @@ let
     cmdline = toString kernelParams;
     vsock.forwards = forwards;
     rosetta = vzCfg.rosetta.enable;
-    nestedVirtualization = vzCfg.nestedVirtualization;
+    inherit (vzCfg) nestedVirtualization;
     # Only `file` carries a path; dispatch rather than fall through, so a new mode cannot
     # silently be emitted as `file`.
     console =

@@ -60,7 +60,7 @@ Add the flake input, then apply the overlay and select the backend in a nix-darw
             { pkgs, ... }:
             {
               nixpkgs.hostPlatform = "aarch64-darwin";
-              nixpkgs.overlays = [ 
+              nixpkgs.overlays = [
                 vzvm.overlays.default # NEW
               ];
 
