@@ -7,7 +7,7 @@
 
 swiftPackages.stdenv.mkDerivation {
   pname = "vzvm";
-  version = "0.1.0";
+  version = "1.0.0";
 
   src = lib.fileset.toSource {
     root = ./.;
@@ -53,7 +53,7 @@ swiftPackages.stdenv.mkDerivation {
       forwards host TCP ports into the guest over vsock, so inbound connections need
       no guest IP discovery.
     '';
-    homepage = "https://github.com/tfc/vzvm";
+    homepage = "https://github.com/applicative-systems/vzvm";
     license = lib.licenses.mit;
 
     # Rosetta and the arm64 direct kernel boot make this Apple-silicon only.
