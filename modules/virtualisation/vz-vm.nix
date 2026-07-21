@@ -55,6 +55,7 @@ let
     cmdline = toString kernelParams;
     vsock.forwards = forwards;
     rosetta = vzCfg.rosetta.enable;
+    nestedVirtualization = vzCfg.nestedVirtualization;
     # Only `file` carries a path; dispatch rather than fall through, so a new mode cannot
     # silently be emitted as `file`.
     console =
@@ -94,6 +95,19 @@ in
         '';
       };
 
+    };
+
+    virtualisation.vz.nestedVirtualization = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Boot the guest at EL2 so it gets a working `/dev/kvm`, which the Nix
+        daemon inside then advertises as the `kvm` system feature — required
+        for running NixOS integration tests on the builder.
+
+        Needs macOS 15+ and an M3 or newer chip; the VM refuses to start
+        otherwise rather than quietly advertising a `kvm` it does not have.
+      '';
     };
 
     virtualisation.vz.forwardPorts = lib.mkOption {

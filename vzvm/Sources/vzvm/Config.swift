@@ -13,12 +13,14 @@ struct Config: Decodable {
   var shares: [Share] = []
   /// Expose Rosetta to the guest. The mount tag is always "rosetta".
   var rosetta: Bool = false
+  /// Boot the guest at EL2 so it gets a working /dev/kvm. macOS 15+ and M3 or newer.
+  var nestedVirtualization: Bool = false
   var vsock: Vsock = Vsock()
   var console: Console = Console()
 
   enum CodingKeys: String, CodingKey, CaseIterable {
     case cpuCount, memorySizeMiB, kernel, initrd, cmdline
-    case disks, shares, rosetta, vsock, console
+    case disks, shares, rosetta, nestedVirtualization, vsock, console
   }
 
   init(from decoder: Decoder) throws {
@@ -32,6 +34,8 @@ struct Config: Decodable {
     disks = try container.decodeIfPresent([Disk].self, forKey: .disks) ?? []
     shares = try container.decodeIfPresent([Share].self, forKey: .shares) ?? []
     rosetta = try container.decodeIfPresent(Bool.self, forKey: .rosetta) ?? false
+    nestedVirtualization =
+      try container.decodeIfPresent(Bool.self, forKey: .nestedVirtualization) ?? false
     vsock = try container.decodeIfPresent(Vsock.self, forKey: .vsock) ?? Vsock()
     console = try container.decodeIfPresent(Console.self, forKey: .console) ?? Console()
   }

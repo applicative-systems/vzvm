@@ -204,6 +204,7 @@ prints the version and usage text and exits non-zero.
   "shares": [{ "tag": "keys", "path": "/var/lib/builder/keys" }],
 
   "rosetta": true,
+  "nestedVirtualization": false,
   "vsock": { "forwards": [{ "listen": "127.0.0.1:31022", "vsockPort": 22 }] },
   "console": { "mode": "stdio" }
 }
@@ -226,6 +227,18 @@ Notes:
 - The kernel must be an uncompressed arm64 `Image`; asserted at startup.
 - `console.mode` is `stdio`, `file` (needs `console.path`), or `log` for unified logging (see
   [Logs](#logs)). The builder profile defaults to `log`.
+- `nestedVirtualization` boots the guest at EL2, giving it a working `/dev/kvm` — this is
+  what lets the builder run NixOS integration tests (`nixosTests`, `testers.runNixOSTest`).
+  Needs macOS 15+ and an M3 or newer chip; startup fails with a clear message otherwise. In
+  the NixOS module it is `virtualisation.vz.nestedVirtualization`; for the builder, set it
+  through the guest config and advertise the features:
+
+  ```nix
+  nix.linux-builder = {
+    config.virtualisation.vz.nestedVirtualization = true;
+    supportedFeatures = [ "kvm" "benchmark" "big-parallel" "nixos-test" ];
+  };
+  ```
 
 ## Logs
 

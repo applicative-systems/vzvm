@@ -53,6 +53,10 @@ enum VirtualMachineBuilder {
     if config.rosetta {
       try checkRosetta()
     }
+
+    if config.nestedVirtualization {
+      try checkNestedVirtualization()
+    }
   }
 
   /// The boot loader needs an uncompressed arm64 `Image`; a gzipped one fails opaquely.
@@ -91,6 +95,23 @@ enum VirtualMachineBuilder {
     }
   }
 
+  /// Nested virtualization is a macOS 15 API, but the nixpkgs Swift toolchain compiles
+  /// against the 14.4 SDK, so both symbols are reached through the Objective-C runtime
+  /// until the toolchain's SDK catches up.
+  private static func checkNestedVirtualization() throws {
+    let platformClass: AnyObject = VZGenericPlatformConfiguration.self
+    guard platformClass.responds(to: NSSelectorFromString("isNestedVirtualizationSupported")),
+      platformClass.value(forKey: "nestedVirtualizationSupported") as? Bool == true
+    else {
+      // Refuse to start rather than boot a guest that would advertise `kvm` but not have it.
+      throw VZVMError.preflight(
+        """
+        nested virtualization is not supported on this host \
+        (requires macOS 15+ and an M3 or newer chip)
+        """)
+    }
+  }
+
   private static func hasMagic(_ path: String, offset: UInt64, bytes: [UInt8]) throws -> Bool {
     let handle = try FileHandle(forReadingFrom: URL(fileURLWithPath: path))
     defer { try? handle.close() }
@@ -102,6 +123,13 @@ enum VirtualMachineBuilder {
     let vmc = VZVirtualMachineConfiguration()
     vmc.cpuCount = config.cpuCount
     vmc.memorySize = config.memorySizeMiB * 1024 * 1024
+
+    if config.nestedVirtualization {
+      let platform = VZGenericPlatformConfiguration()
+      // Runtime lookup for an SDK-14 toolchain; preflight verified the API exists.
+      platform.setValue(true, forKey: "nestedVirtualizationEnabled")
+      vmc.platform = platform
+    }
 
     let boot = VZLinuxBootLoader(kernelURL: URL(fileURLWithPath: config.kernel))
     boot.initialRamdiskURL = URL(fileURLWithPath: config.initrd)
