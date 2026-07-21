@@ -39,13 +39,16 @@ Requires `aarch64-darwin`, macOS 13+, and Rosetta
 
 Add the flake input, then apply the overlay and select the backend in a nix-darwin module:
 
+(You will already have most of this. The new lines are highlighted with `# NEW`)
+
 ```nix
 # flake.nix
 {
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     nix-darwin.url = "github:nix-darwin/nix-darwin";
-    vzvm.url = "github:applicative-systems/vzvm";
+
+    vzvm.url = "github:applicative-systems/vzvm"; # NEW
   };
 
   outputs =
@@ -57,14 +60,16 @@ Add the flake input, then apply the overlay and select the backend in a nix-darw
             { pkgs, ... }:
             {
               nixpkgs.hostPlatform = "aarch64-darwin";
-              nixpkgs.overlays = [ vzvm.overlays.default ];
+              nixpkgs.overlays = [ 
+                vzvm.overlays.default # NEW
+              ];
 
               nix.linux-builder = {
                 enable = true;
-                package = pkgs.darwin.linux-builder-vz;
+                package = pkgs.darwin.linux-builder-vz; # NEW
                 systems = [
                   "aarch64-linux"
-                  "x86_64-linux" # required, or Rosetta goes unused
+                  "x86_64-linux" # NEW: required, or Rosetta goes unused
                 ];
               };
             }
@@ -240,7 +245,9 @@ Use the absolute path — zsh's `log` builtin shadows the system tool:
 
 Console.app shows the same stream (search `systems.applicative.vzvm` under the Mac in
 _Devices_), and lists `linux-builder.log` / `linux-builder.console.log` under _Log Reports_,
-which launchd writes.
+which launchd writes:
+
+![Console.app showing the vzvm builder's log reports](macos-console.png)
 
 One caveat: **unified logging rate-limits and drops under bursts** — exactly when a guest is
 failing loudly. For a complete post-mortem record set `virtualisation.vz.console = "file"`
