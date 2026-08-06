@@ -219,6 +219,9 @@ writable.
 Notes:
 
 - `disks` map positionally onto `/dev/vda`, `/dev/vdb`, ... Order is significant.
+- A forward carries exactly one of `listen` (loopback TCP `host:port`) or `listenSocket`
+  (a unix socket path, created by vzvm, owner-only). See
+  [Skipping sshd](#skipping-sshd-direct-daemon-mode) for what `listenSocket` is for.
 - A disk whose _contents_ are a QEMU qcow2 is rejected — the check reads magic bytes, not the
   name. The `.qcow2` path above is a raw disk keeping that filename because nix-darwin's
   `ephemeral` expects it; this catches genuine leftovers from `darwin.linux-builder`.
@@ -239,6 +242,44 @@ Notes:
     supportedFeatures = [ "kvm" "benchmark" "big-parallel" "nixos-test" ];
   };
   ```
+
+## Skipping sshd: direct daemon mode
+
+The `ssh-ng` remote-build protocol is `nix-daemon --stdio` piped over a transport — sshd
+contributes authentication and a measured ~73 ms handshake per connection (see
+[Benchmarks](#benchmarks)), paid once per derivation. Since vzvm owns a private host↔guest
+channel, the guest can serve `nix-daemon --stdio` straight from a vsock port, spliced to a
+root-owned unix socket on the host. Opt in from nix-darwin:
+
+```nix
+{
+  imports = [ vzvm.darwinModules.linux-builder-vz ];
+  nix.linux-builder-vz.directDaemon.enable = true;
+}
+```
+
+sshd stays untouched — port 31022 still works for interactive debugging — and `systems`,
+`maxJobs` and `supportedFeatures` are inherited from your `nix.linux-builder` settings.
+
+How the host side connects is worth recording, because the obvious approach fails: a
+`unix://` machine URI is Nix's `UDSRemoteStore`, a `LocalFSStore` that assumes the socket
+belongs to the same machine and reads store objects from the **host's** filesystem —
+queries and builds forward over the protocol, and then copying outputs back fails on the
+host's own empty `/nix/store`. The working transport is
+`ssh-ng://localhost?remote-program=<bridge>`: `ssh-ng` is a pure remote store that streams
+everything over the wire, the `localhost` authority engages `fakeSSH` in Nix's SSHMaster —
+no ssh subprocess, Nix execs the remote program directly — and the bridge is a two-line
+`socat - UNIX-CONNECT:<socket>` wrapper.
+
+Caveats:
+
+- The module `mkForce`-replaces `nix.buildMachines`, because nix-darwin's own ssh entry
+  cannot be suppressed individually. Extra build machines of yours must be re-added above
+  that priority.
+- Security is unchanged in spirit: the socket is root-owned and 0600, gating the builder
+  behind root exactly like the root-owned ssh key does today.
+- Inside the guest, each connection gets its own `nix-daemon --stdio` running as `builder`,
+  which splices into the guest's root daemon — the same trust chain `ssh-ng` uses.
 
 ## Logs
 

@@ -32,6 +32,17 @@ in
     ../virtualisation/vz-vm.nix
   ];
 
+  options.virtualisation.darwin-builder.daemonSocketPath = lib.mkOption {
+    type = lib.types.str;
+    default = "/var/lib/linux-builder/nix-daemon.sock";
+    description = ''
+      Host unix socket serving the Nix daemon protocol when
+      {option}`virtualisation.vz.vsockNixDaemon.enable` is set. Must match the
+      `unix://` store URI in the host's build machine entry; the shipped
+      nix-darwin module keeps the two in sync.
+    '';
+  };
+
   config = {
     virtualisation.vz.forwardPorts = [
       {
@@ -39,6 +50,13 @@ in
         host.port = cfg.hostPort;
         # Must track the port the guest serves SSH on, or the host forwards nowhere.
         guest.port = config.virtualisation.vz.vsockSSH.port;
+      }
+    ];
+
+    virtualisation.vz.forwardUnixSockets = lib.mkIf config.virtualisation.vz.vsockNixDaemon.enable [
+      {
+        host.path = cfg.daemonSocketPath;
+        guest.port = config.virtualisation.vz.vsockNixDaemon.port;
       }
     ];
 

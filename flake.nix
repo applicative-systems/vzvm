@@ -31,6 +31,12 @@
         nix-builder-vz-vm = ./modules/profiles/nix-builder-vz-vm.nix;
       };
 
+      darwinModules = {
+        # Opt-in sshd-free transport: daemon protocol over vsock via a fakeSSH bridge.
+        linux-builder-vz = ./modules/darwin/linux-builder-vz.nix;
+        default = inputs.self.darwinModules.linux-builder-vz;
+      };
+
       packages.${system} = {
         default = pkgs.vzvm;
         inherit (pkgs) vzvm;

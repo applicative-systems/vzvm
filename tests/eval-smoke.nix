@@ -35,6 +35,16 @@ let
 
   machine = mkMachine { };
 
+  daemonMachine = mkMachine {
+    virtualisation.vz.vsockNixDaemon.enable = true;
+    virtualisation.vz.forwardUnixSockets = [
+      {
+        host.path = "/var/lib/linux-builder/nix-daemon.sock";
+        guest.port = 23;
+      }
+    ];
+  };
+
   # Only `file` carries a path. Rendering the console used to fall through an if/else that
   # turned any unrecognised mode into `file`, which nothing caught.
   consoleMachines = {
@@ -70,6 +80,23 @@ let
     # Pins the pruned schema: vzvm rejects unknown keys, so re-growing one fails at load.
     "enables rosetta as a plain flag" = ".rosetta == true";
     "does not emit a network object" = ".network == null";
+    # vzvm enforces exactly-one-of listen/listenSocket; a TCP entry growing a
+    # listenSocket key (or vice versa) must fail here, not at VM start.
+    "emits no unix forward unless asked" = ''
+      [.vsock.forwards[] | has("listenSocket")] | any | not
+    '';
+  };
+
+  # jq filters against the daemon-mode machine's config
+  daemonConfigAssertions = {
+    "unix forward carries exactly listenSocket and vsockPort" = ''
+      [.vsock.forwards[] | select(has("listenSocket"))] ==
+        [{ listenSocket: "/var/lib/linux-builder/nix-daemon.sock", vsockPort: 23 }]
+    '';
+    "tcp forward is untouched by the unix option" = ''
+      [.vsock.forwards[] | select(has("listen"))] ==
+        [{ listen: "127.0.0.1:31022", vsockPort: 22 }]
+    '';
   };
 
   runnerAssertions = {
@@ -117,6 +144,20 @@ runCommand "vz-eval-smoke"
           fail=1
         fi
       '') runnerAssertions
+    )}
+
+    daemonScript=${daemonMachine.config.system.build.vm}/bin/run-${daemonMachine.config.networking.hostName}-vm
+    daemonConfig=$(grep -o '/nix/store/[a-z0-9]*-vzvm-config.json' "$daemonScript" | head -1)
+
+    ${lib.concatStringsSep "\n" (
+      lib.mapAttrsToList (description: filter: ''
+        if jq -e ${lib.escapeShellArg filter} "$daemonConfig" > /dev/null; then
+          echo "ok: ${description}"
+        else
+          echo "FAIL: ${description}" >&2
+          fail=1
+        fi
+      '') daemonConfigAssertions
     )}
 
     ${lib.concatStringsSep "\n" (

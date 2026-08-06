@@ -35,10 +35,15 @@ let
   ]
   ++ config.boot.kernelParams;
 
-  forwards = map (forward: {
-    listen = "${forward.host.address}:${toString forward.host.port}";
-    vsockPort = forward.guest.port;
-  }) vzCfg.forwardPorts;
+  forwards =
+    map (forward: {
+      listen = "${forward.host.address}:${toString forward.host.port}";
+      vsockPort = forward.guest.port;
+    }) vzCfg.forwardPorts
+    ++ map (forward: {
+      listenSocket = forward.host.path;
+      vsockPort = forward.guest.port;
+    }) vzCfg.forwardUnixSockets;
 
   # The builder profile passes the keys directory as `"$KEYS"`; the runner resolves it.
   shareFragment = lib.concatMapStrings (share: ''
@@ -198,6 +203,62 @@ in
         type = lib.types.port;
         default = 22;
         description = "vsock port that SSH is served on.";
+      };
+    };
+
+    virtualisation.vz.forwardUnixSockets = lib.mkOption {
+      type = lib.types.listOf (
+        lib.types.submodule {
+          options.host.path = lib.mkOption {
+            type = lib.types.str;
+            description = "Host unix socket path to listen on.";
+          };
+          options.guest.port = lib.mkOption {
+            type = lib.types.port;
+            description = "Guest *vsock* port that connections are forwarded to.";
+          };
+        }
+      );
+      default = [ ];
+      example = lib.literalExpression ''
+        [ { host.path = "/var/lib/linux-builder/nix-daemon.sock"; guest.port = 23; } ]
+      '';
+      description = ''
+        Forward host unix-socket connections into the guest over vsock, the
+        unix-domain sibling of {option}`virtualisation.vz.forwardPorts`. The
+        socket is created by vzvm, owner-only (0600).
+      '';
+    };
+
+    virtualisation.vz.vsockNixDaemon = {
+      enable = lib.mkOption {
+        type = lib.types.bool;
+        default = false;
+        description = ''
+          Serve the Nix daemon protocol on a vsock port: each connection is
+          handed its own `nix-daemon --stdio` — the same process `ssh-ng://`
+          would run at the far end of sshd, minus sshd and its per-connection
+          handshake. Point the host at it with a `unix://` store URI on a
+          socket from {option}`virtualisation.vz.forwardUnixSockets`.
+        '';
+      };
+
+      port = lib.mkOption {
+        type = lib.types.port;
+        default = 23;
+        description = "vsock port that the Nix daemon protocol is served on.";
+      };
+
+      user = lib.mkOption {
+        type = lib.types.str;
+        default = "builder";
+        description = ''
+          User the per-connection `nix-daemon --stdio` runs as. As a non-root
+          user it proxies to the guest's root daemon over the local daemon
+          socket, which sees this uid as the peer — mirroring `ssh-ng`
+          semantics, so keep it covered by {option}`nix.settings.trusted-users`.
+          Root would operate the store directly instead.
+        '';
       };
     };
 
@@ -436,6 +497,42 @@ in
 
           # Not `KillMode = "process"`: sshd's `nix-daemon` child would outlive the connection
           # and leak instances against MaxConnections until the guest stops accepting SSH.
+          TimeoutStopSec = 10;
+        };
+      };
+    })
+
+    (lib.mkIf vzCfg.vsockNixDaemon.enable {
+      systemd.sockets.vzvm-nix-daemon = {
+        description = "Nix daemon vsock socket";
+        wantedBy = [ "sockets.target" ];
+        socketConfig = {
+          ListenStream = "vsock::${toString vzCfg.vsockNixDaemon.port}";
+          Accept = true;
+
+          # Same burst rationale as vzvm-ssh: past the limit systemd stops accepting and
+          # connections hang without a log line anywhere.
+          MaxConnections = 512;
+
+          TriggerLimitIntervalSec = 0;
+        };
+      };
+
+      systemd.services."vzvm-nix-daemon@" = {
+        description = "Nix daemon per-connection (vsock)";
+        # The --stdio daemon must splice into the singleton root daemon, like sshd's does.
+        requires = [ "nix-daemon.socket" ];
+        after = [ "nix-daemon.socket" ];
+        # Forced, not left to `auto`: a --stdio daemon that resolves to a local store
+        # serves each connection from its own mount namespace and sqlite handle, and
+        # Nix's remote-build protocol assumes one consistent daemon across connections.
+        environment.NIX_REMOTE = "daemon";
+        serviceConfig = {
+          ExecStart = "${lib.getExe' config.nix.package "nix-daemon"} --stdio";
+          User = vzCfg.vsockNixDaemon.user;
+          StandardInput = "socket";
+          StandardOutput = "socket";
+          StandardError = "journal";
           TimeoutStopSec = 10;
         };
       };

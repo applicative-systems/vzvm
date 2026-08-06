@@ -83,16 +83,36 @@ struct Config: Decodable {
 
     struct Forward: Decodable {
       /// "127.0.0.1:31022"
-      var listen: String
+      var listen: String?
+      /// Path to a unix socket to listen on instead of TCP.
+      var listenSocket: String?
       var vsockPort: UInt32
 
-      enum CodingKeys: String, CodingKey, CaseIterable { case listen, vsockPort }
+      enum CodingKeys: String, CodingKey, CaseIterable { case listen, listenSocket, vsockPort }
+
+      enum Kind {
+        case tcp(String)
+        case unix(String)
+      }
+
+      var kind: Kind {
+        if let listenSocket { return .unix(listenSocket) }
+        guard let listen else { preconditionFailure("validated in init") }
+        return .tcp(listen)
+      }
+
+      /// For log messages.
+      var label: String { listenSocket ?? listen ?? "?" }
 
       init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
         try decoder.rejectUnknownKeys(CodingKeys.self)
-        listen = try container.decode(String.self, forKey: .listen)
+        listen = try container.decodeIfPresent(String.self, forKey: .listen)
+        listenSocket = try container.decodeIfPresent(String.self, forKey: .listenSocket)
         vsockPort = try container.decode(UInt32.self, forKey: .vsockPort)
+        guard (listen == nil) != (listenSocket == nil) else {
+          throw VZVMError.config("forward needs exactly one of 'listen' or 'listenSocket'")
+        }
       }
     }
   }
