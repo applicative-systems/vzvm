@@ -176,7 +176,6 @@ enum VirtualMachineBuilder {
     vmc.serialPorts = [try consoleDevice(config.console)]
 
     vmc.entropyDevices = [VZVirtioEntropyDeviceConfiguration()]
-    vmc.memoryBalloonDevices = [VZVirtioTraditionalMemoryBalloonDeviceConfiguration()]
 
     try vmc.validate()
     return vmc
