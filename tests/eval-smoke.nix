@@ -55,6 +55,8 @@ let
     };
   };
 
+  idleMachine = mkMachine { virtualisation.vz.idleTimeout = 600; };
+
   # jq filters
   configAssertions = {
     "boots directly from a kernel" = ''.kernel | startswith("/nix/store")'';
@@ -70,6 +72,7 @@ let
     # Pins the pruned schema: vzvm rejects unknown keys, so re-growing one fails at load.
     "enables rosetta as a plain flag" = ".rosetta == true";
     "does not emit a network object" = ".network == null";
+    "keeps the guest running unless an idle timeout is set" = ''has("idleTimeoutSeconds") | not'';
   };
 
   runnerAssertions = {
@@ -131,6 +134,15 @@ runCommand "vz-eval-smoke"
         fi
       '') consoleMachines
     )}
+
+    idleScript=${idleMachine.config.system.build.vm}/bin/run-${idleMachine.config.networking.hostName}-vm
+    idleConfig=$(grep -o '/nix/store/[a-z0-9]*-vzvm-config.json' "$idleScript" | head -1)
+    if jq -e '.idleTimeoutSeconds == 600' "$idleConfig" > /dev/null; then
+      echo "ok: idle timeout renders in seconds"
+    else
+      echo "FAIL: idle timeout rendered $(jq -c .idleTimeoutSeconds "$idleConfig")" >&2
+      fail=1
+    fi
 
     # Runtime-resolved values must not be frozen into the evaluated config.
     for key in disks shares; do
