@@ -1,7 +1,7 @@
 import Foundation
 import Virtualization
 
-let version = "1.0.0"
+let version = "1.1.0"
 
 let usage = """
   vzvm \(version)
@@ -49,35 +49,15 @@ do {
   fail("invalid VM configuration: \(error.localizedDescription)", code: ExitCode.config)
 }
 
-let vmQueue = DispatchQueue(label: "vzvm.vm")
-let virtualMachine = VZVirtualMachine(configuration: vmConfiguration, queue: vmQueue)
+let machine = Machine(
+  config: config, configuration: vmConfiguration, queue: DispatchQueue(label: "vzvm.vm"))
 
-/// Exits when the guest powers off, so that launchd `KeepAlive` semantics behave.
-final class Delegate: NSObject, VZVirtualMachineDelegate {
-  func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-    Log.info("guest powered off")
-    Runner.shared.finish(ExitCode.ok)
-  }
-
-  func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-    Log.error("guest stopped: \(error.localizedDescription)")
-    Runner.shared.finish(ExitCode.guestError)
-  }
-
-  func virtualMachine(
-    _ virtualMachine: VZVirtualMachine,
-    networkDevice: VZNetworkDevice,
-    attachmentWasDisconnectedWithError error: Error
-  ) {
-    Log.warn("network detached: \(error.localizedDescription)")
-  }
-}
-
-/// Owns shutdown, so signals, guest poweroff and start failures converge on one path.
+/// Owns process exit, so signals, guest poweroff and start failures converge on one path.
 final class Runner {
   static let shared = Runner()
   private var proxies: [VsockProxy] = []
   private var terminating = false
+  private var stopRequested = false
   private let lock = NSLock()
 
   func adopt(_ proxy: VsockProxy) { proxies.append(proxy) }
@@ -93,40 +73,17 @@ final class Runner {
     exit(code)
   }
 
-  /// SIGTERM/SIGINT: ask the guest to shut down cleanly, then force it if it will not.
+  /// SIGTERM/SIGINT: ask the guest to shut down cleanly; a second signal exits at once.
   func requestStop() {
     lock.lock()
-    let alreadyFinishing = terminating
+    let alreadyStopping = stopRequested
+    stopRequested = true
     lock.unlock()
-    if alreadyFinishing {
+    if alreadyStopping {
       // Second signal: e.g. impatient user
       finish(ExitCode.ok)
     }
-    Log.info("stopping guest")
-    vmQueue.async {
-      guard virtualMachine.canRequestStop else {
-        Log.warn("guest cannot be asked to stop; forcing")
-        self.forceStop()
-        return
-      }
-      do {
-        try virtualMachine.requestStop()
-      } catch {
-        Log.warn("requestStop failed: \(error.localizedDescription); forcing")
-        self.forceStop()
-      }
-    }
-    // requestStop needs working ACPI/logind in the guest; do not hang forever if it lacks it.
-    DispatchQueue.global().asyncAfter(deadline: .now() + 30) {
-      Log.warn("guest did not stop within 30s; forcing")
-      self.forceStop()
-    }
-  }
-
-  private func forceStop() {
-    vmQueue.async {
-      virtualMachine.stop { _ in Runner.shared.finish(ExitCode.ok) }
-    }
+    machine.terminate()
   }
 }
 
@@ -151,8 +108,6 @@ enum Terminal {
   }
 }
 
-let delegate = Delegate()
-
 // Peers vanish mid-write; that must surface as EPIPE, not SIGPIPE killing the VM (exit 141).
 signal(SIGPIPE, SIG_IGN)
 
@@ -170,42 +125,23 @@ if config.console.mode == "stdio" {
   Terminal.makeRaw()
 }
 
-vmQueue.async {
-  virtualMachine.delegate = delegate
-
-  if !config.vsock.forwards.isEmpty {
-    guard let device = virtualMachine.socketDevices.first as? VZVirtioSocketDevice else {
-      Log.error("no vsock device present")
-      Runner.shared.finish(ExitCode.runtime)
-      return
-    }
-    for forward in config.vsock.forwards {
-      let proxy = VsockProxy(forward: forward, device: device, vmQueue: vmQueue)
-      do {
-        try proxy.start()
-      } catch {
-        Log.error("\(error)")
-        // A malformed listen address is a config error, though it only surfaces here.
-        if case VZVMError.config = error {
-          Runner.shared.finish(ExitCode.config)
-        } else {
-          Runner.shared.finish(ExitCode.runtime)
-        }
-        return
-      }
-      Runner.shared.adopt(proxy)
-    }
-  }
-
-  virtualMachine.start { result in
-    switch result {
-    case .success:
-      Log.info("guest started")
-    case .failure(let error):
-      Log.error("failed to start guest: \(error.localizedDescription)")
+// Listeners come up before the guest: in on-demand mode a connection is what boots it.
+for forward in config.vsock.forwards {
+  let proxy = VsockProxy(forward: forward, machine: machine)
+  do {
+    try proxy.start()
+  } catch {
+    Log.error("\(error)")
+    // A malformed listen address is a config error, though it only surfaces here.
+    if case VZVMError.config = error {
+      Runner.shared.finish(ExitCode.config)
+    } else {
       Runner.shared.finish(ExitCode.runtime)
     }
   }
+  Runner.shared.adopt(proxy)
 }
+
+machine.launch()
 
 dispatchMain()

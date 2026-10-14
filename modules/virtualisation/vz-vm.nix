@@ -69,6 +69,7 @@ let
       else
         { mode = vzCfg.console; };
   }
+  // lib.optionalAttrs (vzCfg.idleTimeout != null) { idleTimeoutSeconds = vzCfg.idleTimeout; }
   // vzCfg.extraConfig;
 
   staticConfigFile = hostPkgs.writeText "vzvm-config.json" (builtins.toJSON staticConfig);
@@ -201,6 +202,25 @@ in
         default = 22;
         description = "vsock port that SSH is served on.";
       };
+    };
+
+    virtualisation.vz.idleTimeout = lib.mkOption {
+      type = lib.types.nullOr lib.types.ints.positive;
+      default = null;
+      example = 30 * 60;
+      description = ''
+        Run the guest on demand: `vzvm` keeps listening on
+        {option}`virtualisation.vz.forwardPorts`, boots the guest on the first
+        connection, and powers it off once no forwarded connection has been open
+        for this many seconds. The next connection boots it again and waits for
+        it, so a client only sees a slower first connect.
+
+        These reboots happen inside the running `vzvm` and keep the data disk:
+        nix-darwin's `nix.linux-builder.ephemeral` wipes it only when the launchd
+        service starts, not each time the guest boots on demand.
+
+        `null` runs the guest for as long as `vzvm` runs.
+      '';
     };
 
     virtualisation.vz.extraConfig = lib.mkOption {
