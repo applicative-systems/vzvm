@@ -21,6 +21,15 @@ enum VirtualMachineBuilder {
         "memorySizeMiB \(config.memorySizeMiB) outside supported range \(minMiB)..\(maxMiB)")
     }
 
+    if let idle = config.idleTimeoutSeconds {
+      guard idle >= 1 else {
+        throw VZVMError.config("idleTimeoutSeconds must be >= 1")
+      }
+      guard !config.vsock.forwards.isEmpty else {
+        throw VZVMError.config("idleTimeoutSeconds needs at least one vsock forward")
+      }
+    }
+
     try checkKernel(config.kernel)
 
     guard FileManager.default.fileExists(atPath: config.initrd) else {
