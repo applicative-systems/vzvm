@@ -5,8 +5,9 @@ import Virtualization
 final class VsockProxy {
   private let forward: Config.Vsock.Forward
   private let queue: DispatchQueue
-  private let vmQueue: DispatchQueue
-  private weak var device: VZVirtioSocketDevice?
+  /// Provides guest's vsock device, which comes and goes with on-demand boots.
+  private let machine: Machine
+  private var vmQueue: DispatchQueue { machine.queue }
 
   private var listenFD: Int32 = -1
   private var acceptSource: DispatchSourceRead?
@@ -14,10 +15,9 @@ final class VsockProxy {
   private var bridges: Set<Bridge> = []
   private let lock = NSLock()
 
-  init(forward: Config.Vsock.Forward, device: VZVirtioSocketDevice, vmQueue: DispatchQueue) {
+  init(forward: Config.Vsock.Forward, machine: Machine) {
     self.forward = forward
-    self.device = device
-    self.vmQueue = vmQueue
+    self.machine = machine
     self.queue = DispatchQueue(label: "vzvm.proxy.\(forward.vsockPort)")
   }
 
@@ -108,20 +108,21 @@ final class VsockProxy {
     var yes: Int32 = 1
     setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &yes, socklen_t(MemoryLayout<Int32>.size))
 
+    // Counted from accept, so a connection held while the guest boots keeps it from idling.
+    machine.connectionOpened()
     connect(client: client, attempt: 0)
   }
 
   /// Holds the client and retries while the guest boots. one refusal makes Nix drop the builder.
   private func connect(client: Int32, attempt: Int) {
-    guard let device else {
-      Log.warn("vsock device gone. dropping connection on \(forward.listen)")
-      close(client)
-      return
-    }
     let port = forward.vsockPort
 
     // VZVirtioSocketDevice must be touched on the VM's queue.
     vmQueue.async {
+      guard let device = self.machine.socketDevice else {
+        self.retry(client: client, attempt: attempt, reason: "guest is not running")
+        return
+      }
       device.connect(toPort: port) { [weak self] result in
         guard let self else {
           close(client)
@@ -131,19 +132,25 @@ final class VsockProxy {
         case .success(let connection):
           self.bridge(client: client, connection: connection)
         case .failure(let error):
-          guard attempt < 60 else {
-            Log.warn("vsock:\(port) connect failed: \(error.localizedDescription). giving up")
-            close(client)
-            return
-          }
-          if attempt == 0 {
-            Log.info("vsock:\(port) not ready. holding connection until the guest is up")
-          }
-          self.queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-            self?.connect(client: client, attempt: attempt + 1)
-          }
+          self.retry(client: client, attempt: attempt, reason: error.localizedDescription)
         }
       }
+    }
+  }
+
+  private func retry(client: Int32, attempt: Int, reason: String) {
+    let port = forward.vsockPort
+    guard attempt < 60 else {
+      Log.warn("vsock:\(port) connect failed: \(reason). giving up")
+      close(client)
+      machine.connectionClosed()
+      return
+    }
+    if attempt == 0 {
+      Log.info("vsock:\(port) not ready. holding connection until the guest is up")
+    }
+    queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+      self?.connect(client: client, attempt: attempt + 1)
     }
   }
 
@@ -154,6 +161,7 @@ final class VsockProxy {
       self.lock.lock()
       self.bridges.remove(finished)
       self.lock.unlock()
+      self.machine.connectionClosed()
     }
     lock.lock()
     bridges.insert(bridge)
