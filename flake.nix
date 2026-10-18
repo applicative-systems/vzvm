@@ -60,6 +60,38 @@
           ];
           text = builtins.readFile ./bench/run-all.sh;
         };
+
+        # `nix run .#lifecycle-test` -- boots a real guest through the on-demand lifecycle.
+        #
+        # Local only: CI runners cannot start Virtualization.framework guests. Uses its own
+        # port, so the nix-darwin builder can keep running. Takes a few minutes.
+        lifecycle-test =
+          let
+            port = 31122;
+            idle = 8;
+            builder = pkgs.darwin.linux-builder-vz.override {
+              modules = [
+                {
+                  virtualisation.darwin-builder.hostPort = port;
+                  virtualisation.vz.idleTimeout = idle;
+                  virtualisation.vz.console = "file";
+                }
+              ];
+            };
+          in
+          pkgs.writeShellApplication {
+            name = "lifecycle-test";
+            runtimeInputs = [
+              pkgs.openssh
+              pkgs.coreutils
+            ];
+            text = ''
+              run_builder=${lib.getExe builder.run-builder}
+              port=${toString port}
+              idle=${toString idle}
+            ''
+            + builtins.readFile ./tests/lifecycle.sh;
+          };
       };
 
       formatter.${system} =
