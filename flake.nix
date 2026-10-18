@@ -34,6 +34,8 @@
       packages.${system} = {
         default = pkgs.vzvm;
         inherit (pkgs) vzvm;
+        # The installed binary: exit codes, signals, port takeover. No guest boots.
+        vzvm-cli = pkgs.vzvm.tests.cli;
         inherit (pkgs.darwin) linux-builder-vz;
 
         # `nix run .#benchmark-full` -- the whole A/B session in one command.
@@ -164,6 +166,8 @@
       checks.${system} = {
         formatting = inputs.self.formatter.${system}.check inputs.self;
         inherit (pkgs) vzvm;
+        # The installed binary: exit codes, signals, port takeover. No guest boots.
+        vzvm-cli = pkgs.vzvm.tests.cli;
         # Booting needs Virtualization.framework, so only evaluation and the runner are checked.
         eval-smoke = pkgs.callPackage ./tests/eval-smoke.nix { };
         # The benchmark needs sudo and hours, so only its subjects' comparability is asserted.

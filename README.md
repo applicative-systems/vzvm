@@ -352,8 +352,8 @@ nix.linux-builder.config = {
 | 71   | guest stopped with an error                                        |
 | 78   | configuration error                                                |
 
-A malformed `vsock.forwards` listen address is reported as 70, not 78 — it is only detected
-once the proxies start, after preflight.
+A malformed `vsock.forwards` listen address is still a configuration error (78), although it
+is only detected once the proxies start, after preflight.
 
 ## Troubleshooting
 
