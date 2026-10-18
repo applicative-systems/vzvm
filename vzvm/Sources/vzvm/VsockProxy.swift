@@ -140,6 +140,13 @@ final class VsockProxy {
 
   private func retry(client: Int32, attempt: Int, reason: String) {
     let port = forward.vsockPort
+    // Otherwise a client that gave up keeps the guest booting, or up, for nobody.
+    guard !Self.clientGone(client) else {
+      Log.info("client left before vsock:\(port) was ready")
+      close(client)
+      machine.connectionClosed()
+      return
+    }
     guard attempt < 60 else {
       Log.warn("vsock:\(port) connect failed: \(reason). giving up")
       close(client)
@@ -152,6 +159,15 @@ final class VsockProxy {
     queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
       self?.connect(client: client, attempt: attempt + 1)
     }
+  }
+
+  /// TCP state rather than a peek:
+  /// SSH clients send their banner first. Unread data would hide the FIN behind it.
+  private static func clientGone(_ fd: Int32) -> Bool {
+    var info = tcp_connection_info()
+    var size = socklen_t(MemoryLayout<tcp_connection_info>.size)
+    guard getsockopt(fd, IPPROTO_TCP, TCP_CONNECTION_INFO, &info, &size) == 0 else { return true }
+    return info.tcpi_state != TCPS_ESTABLISHED
   }
 
   private func bridge(client: Int32, connection: VZVirtioSocketConnection) {

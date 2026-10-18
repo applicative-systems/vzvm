@@ -60,15 +60,21 @@ final class Runner {
   private var stopRequested = false
   private let lock = NSLock()
 
-  func adopt(_ proxy: VsockProxy) { proxies.append(proxy) }
+  /// Proxies start off the main queue, so a signal may finish() concurrently.
+  func adopt(_ proxy: VsockProxy) {
+    lock.lock()
+    proxies.append(proxy)
+    lock.unlock()
+  }
 
   func finish(_ code: Int32) {
     lock.lock()
     let alreadyFinishing = terminating
     terminating = true
+    let current = proxies
     lock.unlock()
     guard !alreadyFinishing else { return }
-    for proxy in proxies { proxy.stop() }
+    for proxy in current { proxy.stop() }
     Terminal.restore()
     exit(code)
   }
@@ -125,23 +131,27 @@ if config.console.mode == "stdio" {
   Terminal.makeRaw()
 }
 
-// Listeners come up before the guest: in on-demand mode a connection is what boots it.
-for forward in config.vsock.forwards {
-  let proxy = VsockProxy(forward: forward, machine: machine)
-  do {
-    try proxy.start()
-  } catch {
-    Log.error("\(error)")
-    // A malformed listen address is a config error, though it only surfaces here.
-    if case VZVMError.config = error {
-      Runner.shared.finish(ExitCode.config)
-    } else {
-      Runner.shared.finish(ExitCode.runtime)
+// Off the main queue: binding may wait out a previous instance for up to 60s, and the
+// signal handlers above must still run meanwhile.
+DispatchQueue.global().async {
+  // Listeners come up before the guest: in on-demand mode a connection is what boots it.
+  for forward in config.vsock.forwards {
+    let proxy = VsockProxy(forward: forward, machine: machine)
+    do {
+      try proxy.start()
+    } catch {
+      Log.error("\(error)")
+      // malformed listen address is a config error but only surfaces here.
+      if case VZVMError.config = error {
+        Runner.shared.finish(ExitCode.config)
+      } else {
+        Runner.shared.finish(ExitCode.runtime)
+      }
     }
+    Runner.shared.adopt(proxy)
   }
-  Runner.shared.adopt(proxy)
-}
 
-machine.launch()
+  machine.launch()
+}
 
 dispatchMain()

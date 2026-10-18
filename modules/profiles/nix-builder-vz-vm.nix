@@ -41,7 +41,8 @@ in
     ];
 
     # Give the RAM back when no build has run for a while. Boot takes ~12s, which the first
-    # build afterwards waits out; vzvm holds its connection meanwhile.
+    # build afterwards waits out; vzvm holds its connection meanwhile. Stopping the guest is
+    # the only way: VZ's memory balloon returns nothing to the host in practice.
     virtualisation.vz.idleTimeout = lib.mkDefault (30 * 60);
 
     # The guest console belongs where a Mac user looks for service logs. Switch to `file`
