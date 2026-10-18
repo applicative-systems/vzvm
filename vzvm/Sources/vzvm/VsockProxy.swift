@@ -60,31 +60,32 @@ final class VsockProxy {
       throw VZVMError.config("invalid listen address '\(forward.listen)'")
     }
 
+    /// 0 or the errno, captured at once: logging, sleeping, even Date() overwrite errno.
     func tryBind() -> Int32 {
-      withUnsafePointer(to: &addr) { pointer in
+      let result = withUnsafePointer(to: &addr) { pointer in
         pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
           Darwin.bind(fd, sa, socklen_t(MemoryLayout<sockaddr_in>.size))
         }
       }
+      return result == 0 ? 0 : errno
     }
 
     // Wait out the previous instance's shutdown. exiting here would crash-loop under launchd.
-    var bound = tryBind()
-    if bound != 0 && errno == EADDRINUSE {
+    var bindError = tryBind()
+    if bindError == EADDRINUSE {
       Log.info("waiting for \(forward.listen) (previous instance still shutting down)")
       let deadline = Date(timeIntervalSinceNow: 60)
-      while bound != 0 && errno == EADDRINUSE && Date() < deadline {
+      while bindError == EADDRINUSE && Date() < deadline {
         usleep(500_000)
-        bound = tryBind()
+        bindError = tryBind()
       }
     }
-    guard bound == 0 else {
-      let reason = String(cString: strerror(errno))
+    guard bindError == 0 else {
       close(fd)
       throw VZVMError.runtime(
         """
-        cannot listen on \(forward.listen): \(reason)\
-        \(errno == EADDRINUSE ? " (another builder VM is probably already running)" : "")
+        cannot listen on \(forward.listen): \(String(cString: strerror(bindError)))\
+        \(bindError == EADDRINUSE ? " (another builder VM is probably already running)" : "")
         """)
     }
     // Nix opens connections in bursts. an overflowing backlog fails them instantly.
