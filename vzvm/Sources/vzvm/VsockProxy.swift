@@ -1,13 +1,30 @@
 import Foundation
 import Virtualization
 
+/// Production: Machine, tests: fake
+protocol VsockBackend: AnyObject {
+  var queue: DispatchQueue { get }
+  func connectionOpened()
+  func connectionClosed()
+  func connect(
+    toPort port: UInt32, completionHandler: @escaping (Result<VsockConnection, Error>) -> Void)
+}
+
+extension Machine: VsockBackend {}
+
 /// Splices loopback TCP connections into guest vsock, so inbound SSH needs no guest IP.
 final class VsockProxy {
+  /// Polling: VZ never says when the guest starts listening on a vsock port; only a failed
+  /// connect does.
+  static let retryInterval = DispatchTimeInterval.milliseconds(1500)
+  static let maxRetries = 60
+
   private let forward: Config.Vsock.Forward
   private let queue: DispatchQueue
-  /// Provides guest's vsock device, which comes and goes with on-demand boots.
-  private let machine: Machine
-  private var vmQueue: DispatchQueue { machine.queue }
+  /// The guest behind it comes and goes with on-demand boots.
+  private let backend: VsockBackend
+  private let scheduler: Scheduler
+  private var vmQueue: DispatchQueue { backend.queue }
 
   private var listenFD: Int32 = -1
   private var acceptSource: DispatchSourceRead?
@@ -15,10 +32,12 @@ final class VsockProxy {
   private var bridges: Set<Bridge> = []
   private let lock = NSLock()
 
-  init(forward: Config.Vsock.Forward, machine: Machine) {
+  init(forward: Config.Vsock.Forward, backend: VsockBackend, scheduler: Scheduler? = nil) {
     self.forward = forward
-    self.machine = machine
-    self.queue = DispatchQueue(label: "vzvm.proxy.\(forward.vsockPort)")
+    self.backend = backend
+    let queue = DispatchQueue(label: "vzvm.proxy.\(forward.vsockPort)")
+    self.queue = queue
+    self.scheduler = scheduler ?? QueueScheduler(queue: queue)
   }
 
   func start() throws {
@@ -109,21 +128,20 @@ final class VsockProxy {
     setsockopt(client, IPPROTO_TCP, TCP_NODELAY, &yes, socklen_t(MemoryLayout<Int32>.size))
 
     // Counted from accept, so a connection held while the guest boots keeps it from idling.
-    machine.connectionOpened()
+    backend.connectionOpened()
     connect(client: client, attempt: 0)
   }
 
-  /// Holds the client and retries while the guest boots. one refusal makes Nix drop the builder.
+  /// Our listener accepts while the guest is still booting or off, so there is nothing to
+  /// splice to yet. Closing the client would make Nix mark the builder as failed. Instead it
+  /// is held open, its first bytes (the SSH banner) buffered in the socket, until the guest's
+  /// sshd answers: the client sees a slow handshake, not an error.
   private func connect(client: Int32, attempt: Int) {
     let port = forward.vsockPort
 
     // VZVirtioSocketDevice must be touched on the VM's queue.
     vmQueue.async {
-      guard let device = self.machine.socketDevice else {
-        self.retry(client: client, attempt: attempt, reason: "guest is not running")
-        return
-      }
-      device.connect(toPort: port) { [weak self] result in
+      self.backend.connect(toPort: port) { [weak self] result in
         guard let self else {
           close(client)
           return
@@ -144,21 +162,23 @@ final class VsockProxy {
     guard !Self.clientGone(client) else {
       Log.info("client left before vsock:\(port) was ready")
       close(client)
-      machine.connectionClosed()
+      backend.connectionClosed()
       return
     }
-    guard attempt < 60 else {
+    guard attempt < Self.maxRetries else {
       Log.warn("vsock:\(port) connect failed: \(reason). giving up")
       close(client)
-      machine.connectionClosed()
+      backend.connectionClosed()
       return
     }
     if attempt == 0 {
       Log.info("vsock:\(port) not ready. holding connection until the guest is up")
     }
-    queue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
-      self?.connect(client: client, attempt: attempt + 1)
-    }
+    scheduler.schedule(
+      after: Self.retryInterval,
+      DispatchWorkItem { [weak self] in
+        self?.connect(client: client, attempt: attempt + 1)
+      })
   }
 
   /// TCP state rather than a peek:
@@ -170,14 +190,14 @@ final class VsockProxy {
     return info.tcpi_state != TCPS_ESTABLISHED
   }
 
-  private func bridge(client: Int32, connection: VZVirtioSocketConnection) {
+  private func bridge(client: Int32, connection: VsockConnection) {
     let bridge = Bridge(tcpFD: client, connection: connection, vmQueue: vmQueue) {
       [weak self] finished in
       guard let self else { return }
       self.lock.lock()
       self.bridges.remove(finished)
       self.lock.unlock()
-      self.machine.connectionClosed()
+      self.backend.connectionClosed()
     }
     lock.lock()
     bridges.insert(bridge)
@@ -201,7 +221,7 @@ final class VsockProxy {
 private final class Bridge: Hashable {
   private let tcpFD: Int32
   /// Retained: the connection owns its file descriptor and closes it on `close()`.
-  private let connection: VZVirtioSocketConnection
+  private let connection: VsockConnection
   private let vsockFD: Int32
   private let queue = DispatchQueue(label: "vzvm.bridge")
   /// Virtualization.framework objects tolerate no other queue.
@@ -212,7 +232,7 @@ private final class Bridge: Hashable {
   private var vsockIO: DispatchIO?
 
   init(
-    tcpFD: Int32, connection: VZVirtioSocketConnection, vmQueue: DispatchQueue,
+    tcpFD: Int32, connection: VsockConnection, vmQueue: DispatchQueue,
     onFinish: @escaping (Bridge) -> Void
   ) {
     self.tcpFD = tcpFD
@@ -244,16 +264,31 @@ private final class Bridge: Hashable {
   }
 
   private func pump(from source: DispatchIO, to sink: DispatchIO, sinkFD: Int32) {
+    // Both only touched on `queue`, where every handler below runs.
+    var writesInFlight = 0
+    var sourceDone = false
+    // Full teardown: a half-close is not translated to virtio, so the guest leaks sshd.
+    // Not via sink.barrier: that also waits for the opposite direction's read, which only
+    // ends when the other peer closes too, so a one-sided close never tore anything down.
+    let closeOnceFlushed = { [weak self] in
+      if sourceDone && writesInFlight == 0 { self?.close() }
+    }
     source.read(offset: 0, length: Int.max, queue: queue) { [weak self] done, data, error in
       guard let self else { return }
       if let data, !data.isEmpty {
-        sink.write(offset: 0, data: data, queue: self.queue) { [weak self] _, _, writeError in
-          if writeError != 0 { self?.close() }
+        writesInFlight += 1
+        sink.write(offset: 0, data: data, queue: self.queue) { [weak self] written, _, writeError in
+          guard let self else { return }
+          if writeError != 0 { return self.close() }
+          if written {
+            writesInFlight -= 1
+            closeOnceFlushed()
+          }
         }
       }
       if done || error != 0 {
-        // Full teardown: a half-close is not translated to virtio, so the guest leaks sshd.
-        sink.barrier { [weak self] in self?.close() }
+        sourceDone = true
+        closeOnceFlushed()
       }
     }
   }
