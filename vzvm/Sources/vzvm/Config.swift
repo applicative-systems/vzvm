@@ -17,8 +17,9 @@ struct Config: Decodable {
   var nestedVirtualization: Bool = false
   var vsock: Vsock = Vsock()
   var console: Console = Console()
-  /// Run the guest on demand, shot down after timeout seconds. None means guest runs always.
+  /// Run the guest on demand, shut down after timeout seconds. None means guest runs always.
   var idleTimeoutSeconds: Int?
+  static let maxIdleTimeoutSeconds = 7 * 24 * 60 * 60
 
   enum CodingKeys: String, CodingKey, CaseIterable {
     case cpuCount, memorySizeMiB, kernel, initrd, cmdline
@@ -41,6 +42,16 @@ struct Config: Decodable {
     vsock = try container.decodeIfPresent(Vsock.self, forKey: .vsock) ?? Vsock()
     console = try container.decodeIfPresent(Console.self, forKey: .console) ?? Console()
     idleTimeoutSeconds = try container.decodeIfPresent(Int.self, forKey: .idleTimeoutSeconds)
+    if let idleTimeoutSeconds {
+      guard (1...Self.maxIdleTimeoutSeconds).contains(idleTimeoutSeconds) else {
+        throw VZVMError.config(
+          "'idleTimeoutSeconds' must be between 1 and \(Self.maxIdleTimeoutSeconds)")
+      }
+      // Only a forwarded connection boots an on-demand guest.
+      guard !vsock.forwards.isEmpty else {
+        throw VZVMError.config("'idleTimeoutSeconds' needs at least one 'vsock.forwards' entry")
+      }
+    }
   }
 
   struct Disk: Decodable {

@@ -205,7 +205,8 @@ in
     };
 
     virtualisation.vz.idleTimeout = lib.mkOption {
-      type = lib.types.nullOr lib.types.ints.positive;
+      # vzvm's own bound: a week idle is as good as always on.
+      type = lib.types.nullOr (lib.types.ints.between 1 (7 * 24 * 60 * 60));
       default = null;
       example = 30 * 60;
       description = ''
@@ -255,6 +256,14 @@ in
           message = ''
             virtualisation.vz.diskImage is null, so there is nowhere to put the
             writable store. Enable virtualisation.writableStoreUseTmpfs.
+          '';
+        }
+        {
+          assertion = vzCfg.idleTimeout != null -> vzCfg.forwardPorts != [ ];
+          message = ''
+            virtualisation.vz.idleTimeout boots the guest on the first forwarded
+            connection, but virtualisation.vz.forwardPorts is empty, so the guest
+            would never start.
           '';
         }
       ];

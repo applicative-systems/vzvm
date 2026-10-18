@@ -57,6 +57,13 @@ let
 
   idleMachine = mkMachine { virtualisation.vz.idleTimeout = 600; };
 
+  # Nothing could ever boot it: only a forwarded connection does.
+  idleWithoutForwards = mkMachine {
+    virtualisation.vz.idleTimeout = 600;
+    virtualisation.vz.forwardPorts = lib.mkForce [ ];
+  };
+  idleWithoutForwardsRejected = lib.any (a: !a.assertion) idleWithoutForwards.config.assertions;
+
   # jq filters
   configAssertions = {
     "boots directly from a kernel" = ''.kernel | startswith("/nix/store")'';
@@ -144,6 +151,16 @@ runCommand "vz-eval-smoke"
       echo "FAIL: idle timeout rendered $(jq -c .idleTimeoutSeconds "$idleConfig")" >&2
       fail=1
     fi
+
+    ${
+      if idleWithoutForwardsRejected then
+        ''echo "ok: idle timeout without forwarded ports is rejected"''
+      else
+        ''
+          echo "FAIL: idle timeout without forwarded ports passes the assertions" >&2
+          fail=1
+        ''
+    }
 
     # Runtime-resolved values must not be frozen into the evaluated config.
     for key in disks shares; do

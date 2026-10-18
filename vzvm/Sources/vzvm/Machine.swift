@@ -6,7 +6,8 @@ final class Machine {
 
   let queue: DispatchQueue
   private let config: Config
-  private let idleTimeout: TimeInterval?
+  /// Seconds. Kept integral: a round trip through Double traps near Int.max.
+  private let idleTimeoutSeconds: Int?
 
   private var vm: VZVirtualMachine?
   private var state = State.stopped
@@ -20,16 +21,16 @@ final class Machine {
     self.config = config
     self.nextConfiguration = configuration
     self.queue = queue
-    self.idleTimeout = config.idleTimeoutSeconds.map(TimeInterval.init)
+    self.idleTimeoutSeconds = config.idleTimeoutSeconds
   }
 
-  private var onDemand: Bool { idleTimeout != nil }
+  private var onDemand: Bool { idleTimeoutSeconds != nil }
 
   func launch() {
     queue.async {
-      if let idleTimeout = self.idleTimeout {
+      if let idleTimeoutSeconds = self.idleTimeoutSeconds {
         Log.info(
-          "on demand: guest boots on first connection, stops after \(Int(idleTimeout))s idle")
+          "on demand: guest boots on first connection, stops after \(idleTimeoutSeconds)s idle")
       } else {
         self.boot()
       }
@@ -62,15 +63,15 @@ final class Machine {
   }
 
   private func armIdleTimer() {
-    guard let idleTimeout, state == .running, connections == 0 else { return }
+    guard let idleTimeoutSeconds, state == .running, connections == 0 else { return }
     idleTimer?.cancel()
     let timer = DispatchWorkItem { [weak self] in
       guard let self, self.connections == 0, self.state == .running else { return }
-      Log.info("no connections for \(Int(idleTimeout))s; stopping guest")
+      Log.info("no connections for \(idleTimeoutSeconds)s; stopping guest")
       self.stopGuest()
     }
     idleTimer = timer
-    queue.asyncAfter(deadline: .now() + idleTimeout, execute: timer)
+    queue.asyncAfter(deadline: .now() + .seconds(idleTimeoutSeconds), execute: timer)
   }
 
   private func boot() {
@@ -96,6 +97,14 @@ final class Machine {
         guard self.vm === vm, self.state == .starting else { return }
         Log.info("guest started")
         self.state = .running
+        // terminate() arrived mid-boot, when VZ cannot stop a starting guest yet.
+        // The kernel is still booting and would ignore ACPI; it has served nothing, so cut it off.
+        if self.terminating {
+          self.state = .stopping
+          Log.info("stopping guest that booted during shutdown")
+          self.forceStop(vm)
+          return
+        }
         // The connection that woke us may have given up during boot.
         self.armIdleTimer()
       case .failure(let error):
@@ -112,14 +121,16 @@ final class Machine {
       switch self.state {
       case .stopped: Runner.shared.finish(ExitCode.ok)
       case .stopping: break  // guestStopped() finishes once it is down
-      case .starting, .running: self.stopGuest()
+      case .starting: break  // start completion stops it once running
+      case .running: self.stopGuest()
       }
     }
   }
 
   private func stopGuest() {
     dispatchPrecondition(condition: .onQueue(queue))
-    guard let vm, state == .starting || state == .running else { return }
+    // VZ rejects starting -> stopping, for requestStop() and stop().
+    guard let vm, state == .running else { return }
     state = .stopping
     Log.info("stopping guest")
     if vm.canRequestStop {
@@ -133,11 +144,22 @@ final class Machine {
       Log.warn("guest cannot be asked to stop; forcing")
       forceStop(vm)
     }
+    pressPowerButtonAgain(vm, after: 2)
     // requestStop requires ACPI/logind in guest
     queue.asyncAfter(deadline: .now() + 30) { [weak self] in
       guard let self, self.vm === vm else { return }
       Log.warn("guest did not stop within 30s; forcing")
       self.forceStop(vm)
+    }
+  }
+
+  /// booting guest drops ACPI signal: logind is not up yet.
+  /// Repeat until it is, harmless once shutdown is under way.
+  private func pressPowerButtonAgain(_ vm: VZVirtualMachine, after seconds: Int) {
+    queue.asyncAfter(deadline: .now() + .seconds(seconds)) { [weak self] in
+      guard let self, self.vm === vm, self.state == .stopping, vm.canRequestStop else { return }
+      try? vm.requestStop()
+      self.pressPowerButtonAgain(vm, after: seconds)
     }
   }
 
