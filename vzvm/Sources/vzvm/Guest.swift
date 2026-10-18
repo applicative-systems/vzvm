@@ -1,10 +1,18 @@
 import Foundation
 import Virtualization
 
+/// One stream into the guest. VZVirtioSocketConnection in production, a socketpair in tests.
+protocol VsockConnection: AnyObject {
+  /// Owned by the connection: dup() it to hand it to anything that closes.
+  var fileDescriptor: Int32 { get }
+  func close()
+}
+
+extension VZVirtioSocketConnection: VsockConnection {}
+
 /// What Machine needs from a running guest. VZVirtualMachine in production, a fake in tests.
 protocol Guest: AnyObject {
   var canRequestStop: Bool { get }
-  var socketDevice: VZVirtioSocketDevice? { get }
   /// Called on Machine's queue when the guest stops on its own: nil for a clean poweroff.
   var onStop: ((Error?) -> Void)? { get set }
 
@@ -13,19 +21,22 @@ protocol Guest: AnyObject {
   func requestStop() throws
   /// Pulls the plug.
   func stop(completionHandler: @escaping (Error?) -> Void)
+  /// Fails while nothing in the guest listens on `port`, e.g. during boot.
+  func connect(
+    toPort port: UInt32, completionHandler: @escaping (Result<VsockConnection, Error>) -> Void)
 }
 
-/// Delayed work for Machine's timers. Tests substitute a clock they advance by hand.
+/// Delayed work for timers and retries. Tests substitute a clock they advance by hand.
 protocol Scheduler {
   /// `work` may be cancelled before it is due; it must not run then.
-  func schedule(after seconds: Int, _ work: DispatchWorkItem)
+  func schedule(after delay: DispatchTimeInterval, _ work: DispatchWorkItem)
 }
 
 struct QueueScheduler: Scheduler {
   let queue: DispatchQueue
 
-  func schedule(after seconds: Int, _ work: DispatchWorkItem) {
-    queue.asyncAfter(deadline: .now() + .seconds(seconds), execute: work)
+  func schedule(after delay: DispatchTimeInterval, _ work: DispatchWorkItem) {
+    queue.asyncAfter(deadline: .now() + delay, execute: work)
   }
 }
 
@@ -41,7 +52,6 @@ final class VZGuest: NSObject, Guest, VZVirtualMachineDelegate {
   }
 
   var canRequestStop: Bool { vm.canRequestStop }
-  var socketDevice: VZVirtioSocketDevice? { vm.socketDevices.first as? VZVirtioSocketDevice }
 
   func start(completionHandler: @escaping (Result<Void, Error>) -> Void) {
     vm.start(completionHandler: completionHandler)
@@ -51,6 +61,15 @@ final class VZGuest: NSObject, Guest, VZVirtualMachineDelegate {
 
   func stop(completionHandler: @escaping (Error?) -> Void) {
     vm.stop(completionHandler: completionHandler)
+  }
+
+  func connect(
+    toPort port: UInt32, completionHandler: @escaping (Result<VsockConnection, Error>) -> Void
+  ) {
+    guard let device = vm.socketDevices.first as? VZVirtioSocketDevice else {
+      return completionHandler(.failure(VZVMError.runtime("guest has no vsock device")))
+    }
+    device.connect(toPort: port) { completionHandler($0.map { $0 }) }
   }
 
   func guestDidStop(_ virtualMachine: VZVirtualMachine) { onStop?(nil) }

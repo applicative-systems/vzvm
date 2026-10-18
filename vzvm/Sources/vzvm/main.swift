@@ -146,7 +146,7 @@ if config.console.mode == "stdio" {
 DispatchQueue.global().async {
   // Listeners come up before the guest: in on-demand mode a connection is what boots it.
   for forward in config.vsock.forwards {
-    let proxy = VsockProxy(forward: forward, machine: machine)
+    let proxy = VsockProxy(forward: forward, backend: machine)
     do {
       try proxy.start()
     } catch {

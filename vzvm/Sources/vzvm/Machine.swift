@@ -51,10 +51,14 @@ final class Machine {
     }
   }
 
-  var socketDevice: VZVirtioSocketDevice? {
+  func connect(
+    toPort port: UInt32, completionHandler: @escaping (Result<VsockConnection, Error>) -> Void
+  ) {
     dispatchPrecondition(condition: .onQueue(queue))
-    guard state == .running else { return nil }
-    return guest?.socketDevice
+    guard state == .running, let guest else {
+      return completionHandler(.failure(VZVMError.runtime("guest is not running")))
+    }
+    guest.connect(toPort: port, completionHandler: completionHandler)
   }
 
   func connectionOpened() {
@@ -85,7 +89,7 @@ final class Machine {
       self.stopGuest()
     }
     idleTimer = timer
-    scheduler.schedule(after: idleTimeoutSeconds, timer)
+    scheduler.schedule(after: .seconds(idleTimeoutSeconds), timer)
   }
 
   private func boot() {
@@ -166,7 +170,7 @@ final class Machine {
     pressPowerButtonAgain(guest)
     // requestStop requires ACPI/logind in guest
     scheduler.schedule(
-      after: Self.stopGraceSeconds,
+      after: .seconds(Self.stopGraceSeconds),
       DispatchWorkItem { [weak self] in
         guard let self, self.guest === guest else { return }
         Log.warn("guest did not stop within \(Self.stopGraceSeconds)s; forcing")
@@ -178,7 +182,7 @@ final class Machine {
   /// Repeat until it is, harmless once shutdown is under way.
   private func pressPowerButtonAgain(_ guest: Guest) {
     scheduler.schedule(
-      after: Self.powerButtonIntervalSeconds,
+      after: .seconds(Self.powerButtonIntervalSeconds),
       DispatchWorkItem { [weak self] in
         guard let self, self.guest === guest, self.state == .stopping, guest.canRequestStop
         else { return }
