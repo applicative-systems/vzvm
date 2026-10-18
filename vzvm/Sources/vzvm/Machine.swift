@@ -4,24 +4,38 @@ import Virtualization
 final class Machine {
   private enum State { case stopped, starting, running, stopping }
 
+  /// Requested stops that the guest has not honoured by then are forced.
+  static let stopGraceSeconds = 30
+  /// Interval at which the ACPI power button is pressed again while stopping.
+  static let powerButtonIntervalSeconds = 2
+
   let queue: DispatchQueue
-  private let config: Config
   /// Seconds. Kept integral: a round trip through Double traps near Int.max.
   private let idleTimeoutSeconds: Int?
+  private let scheduler: Scheduler
+  /// Builds a fresh guest per boot: a stopped VZVirtualMachine cannot be started again.
+  private let makeGuest: () throws -> Guest
+  /// Ends the process with an exit code; vzvm has nothing left to do afterwards.
+  private let finish: (Int32) -> Void
 
-  private var vm: VZVirtualMachine?
+  private var guest: Guest?
   private var state = State.stopped
-  private var nextConfiguration: VZVirtualMachineConfiguration?
   private var connections = 0
   private var idleTimer: DispatchWorkItem?
   private var terminating = false
-  private lazy var delegate = Delegate(machine: self)
 
-  init(config: Config, configuration: VZVirtualMachineConfiguration, queue: DispatchQueue) {
-    self.config = config
-    self.nextConfiguration = configuration
+  init(
+    idleTimeoutSeconds: Int?,
+    queue: DispatchQueue,
+    scheduler: Scheduler? = nil,
+    makeGuest: @escaping () throws -> Guest,
+    finish: @escaping (Int32) -> Void
+  ) {
+    self.idleTimeoutSeconds = idleTimeoutSeconds
     self.queue = queue
-    self.idleTimeoutSeconds = config.idleTimeoutSeconds
+    self.scheduler = scheduler ?? QueueScheduler(queue: queue)
+    self.makeGuest = makeGuest
+    self.finish = finish
   }
 
   private var onDemand: Bool { idleTimeoutSeconds != nil }
@@ -40,7 +54,7 @@ final class Machine {
   var socketDevice: VZVirtioSocketDevice? {
     dispatchPrecondition(condition: .onQueue(queue))
     guard state == .running else { return nil }
-    return vm?.socketDevices.first as? VZVirtioSocketDevice
+    return guest?.socketDevice
   }
 
   func connectionOpened() {
@@ -71,30 +85,35 @@ final class Machine {
       self.stopGuest()
     }
     idleTimer = timer
-    queue.asyncAfter(deadline: .now() + .seconds(idleTimeoutSeconds), execute: timer)
+    scheduler.schedule(after: idleTimeoutSeconds, timer)
   }
 
   private func boot() {
     dispatchPrecondition(condition: .onQueue(queue))
-    let configuration: VZVirtualMachineConfiguration
+    let guest: Guest
     do {
-      // stopped VZVirtualMachine not reused; boot with fresh devices
-      configuration = try nextConfiguration ?? VirtualMachineBuilder.build(config)
+      guest = try makeGuest()
     } catch {
       Log.error("cannot configure guest: \(error)")
-      Runner.shared.finish(ExitCode.runtime)
+      finish(ExitCode.runtime)
       return
     }
-    nextConfiguration = nil
-
-    let vm = VZVirtualMachine(configuration: configuration, queue: queue)
-    vm.delegate = delegate
-    self.vm = vm
+    guest.onStop = { [weak self, unowned guest] error in
+      guard let self else { return }
+      if let error {
+        Log.error("guest stopped: \(error.localizedDescription)")
+        self.finish(ExitCode.guestError)
+      } else {
+        Log.info("guest powered off")
+        self.guestStopped(guest)
+      }
+    }
+    self.guest = guest
     state = .starting
-    vm.start { result in
+    guest.start { result in
       switch result {
       case .success:
-        guard self.vm === vm, self.state == .starting else { return }
+        guard self.guest === guest, self.state == .starting else { return }
         Log.info("guest started")
         self.state = .running
         // terminate() arrived mid-boot, when VZ cannot stop a starting guest yet.
@@ -102,14 +121,14 @@ final class Machine {
         if self.terminating {
           self.state = .stopping
           Log.info("stopping guest that booted during shutdown")
-          self.forceStop(vm)
+          self.forceStop(guest)
           return
         }
         // The connection that woke us may have given up during boot.
         self.armIdleTimer()
       case .failure(let error):
         Log.error("failed to start guest: \(error.localizedDescription)")
-        Runner.shared.finish(ExitCode.runtime)
+        self.finish(ExitCode.runtime)
       }
     }
   }
@@ -119,7 +138,7 @@ final class Machine {
       self.terminating = true
       self.idleTimer?.cancel()
       switch self.state {
-      case .stopped: Runner.shared.finish(ExitCode.ok)
+      case .stopped: self.finish(ExitCode.ok)
       case .stopping: break  // guestStopped() finishes once it is down
       case .starting: break  // start completion stops it once running
       case .running: self.stopGuest()
@@ -130,59 +149,64 @@ final class Machine {
   private func stopGuest() {
     dispatchPrecondition(condition: .onQueue(queue))
     // VZ rejects starting -> stopping, for requestStop() and stop().
-    guard let vm, state == .running else { return }
+    guard let guest, state == .running else { return }
     state = .stopping
     Log.info("stopping guest")
-    if vm.canRequestStop {
+    if guest.canRequestStop {
       do {
-        try vm.requestStop()
+        try guest.requestStop()
       } catch {
         Log.warn("requestStop failed: \(error.localizedDescription); forcing")
-        forceStop(vm)
+        forceStop(guest)
       }
     } else {
       Log.warn("guest cannot be asked to stop; forcing")
-      forceStop(vm)
+      forceStop(guest)
     }
-    pressPowerButtonAgain(vm, after: 2)
+    pressPowerButtonAgain(guest)
     // requestStop requires ACPI/logind in guest
-    queue.asyncAfter(deadline: .now() + 30) { [weak self] in
-      guard let self, self.vm === vm else { return }
-      Log.warn("guest did not stop within 30s; forcing")
-      self.forceStop(vm)
-    }
+    scheduler.schedule(
+      after: Self.stopGraceSeconds,
+      DispatchWorkItem { [weak self] in
+        guard let self, self.guest === guest else { return }
+        Log.warn("guest did not stop within \(Self.stopGraceSeconds)s; forcing")
+        self.forceStop(guest)
+      })
   }
 
   /// booting guest drops ACPI signal: logind is not up yet.
   /// Repeat until it is, harmless once shutdown is under way.
-  private func pressPowerButtonAgain(_ vm: VZVirtualMachine, after seconds: Int) {
-    queue.asyncAfter(deadline: .now() + .seconds(seconds)) { [weak self] in
-      guard let self, self.vm === vm, self.state == .stopping, vm.canRequestStop else { return }
-      try? vm.requestStop()
-      self.pressPowerButtonAgain(vm, after: seconds)
-    }
+  private func pressPowerButtonAgain(_ guest: Guest) {
+    scheduler.schedule(
+      after: Self.powerButtonIntervalSeconds,
+      DispatchWorkItem { [weak self] in
+        guard let self, self.guest === guest, self.state == .stopping, guest.canRequestStop
+        else { return }
+        try? guest.requestStop()
+        self.pressPowerButtonAgain(guest)
+      })
   }
 
-  private func forceStop(_ vm: VZVirtualMachine) {
-    vm.stop { error in
+  private func forceStop(_ guest: Guest) {
+    guest.stop { error in
       guard let error else {
-        self.guestStopped(vm)
+        self.guestStopped(guest)
         return
       }
       Log.error("cannot stop guest: \(error.localizedDescription)")
-      Runner.shared.finish(ExitCode.runtime)
+      self.finish(ExitCode.runtime)
     }
   }
 
-  fileprivate func guestStopped(_ stopped: VZVirtualMachine) {
+  private func guestStopped(_ stopped: Guest) {
     dispatchPrecondition(condition: .onQueue(queue))
-    guard vm === stopped else { return }
-    vm = nil
+    guard guest === stopped else { return }
+    guest = nil
     state = .stopped
     idleTimer?.cancel()
     idleTimer = nil
     guard onDemand && !terminating else {
-      Runner.shared.finish(ExitCode.ok)
+      finish(ExitCode.ok)
       return
     }
     if connections > 0 {
@@ -190,30 +214,6 @@ final class Machine {
       boot()
     } else {
       Log.info("guest stopped; next connection boots it again")
-    }
-  }
-
-  private final class Delegate: NSObject, VZVirtualMachineDelegate {
-    private unowned let machine: Machine
-
-    init(machine: Machine) { self.machine = machine }
-
-    func guestDidStop(_ virtualMachine: VZVirtualMachine) {
-      Log.info("guest powered off")
-      machine.guestStopped(virtualMachine)
-    }
-
-    func virtualMachine(_ virtualMachine: VZVirtualMachine, didStopWithError error: Error) {
-      Log.error("guest stopped: \(error.localizedDescription)")
-      Runner.shared.finish(ExitCode.guestError)
-    }
-
-    func virtualMachine(
-      _ virtualMachine: VZVirtualMachine,
-      networkDevice: VZNetworkDevice,
-      attachmentWasDisconnectedWithError error: Error
-    ) {
-      Log.warn("network detached: \(error.localizedDescription)")
     }
   }
 }
