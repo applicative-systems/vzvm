@@ -257,7 +257,7 @@ will be simpler to use and far better documented for it.
   "memorySizeMiB": 8192,
   "kernel": "/nix/store/.../Image",
   "initrd": "/nix/store/.../initrd",
-  "cmdline": "console=hvc0 init=/nix/store/.../init regInfo=/nix/store/.../registration",
+  "cmdline": "console=hvc0 init=/nix/store/.../init regInfo=/nix/.ro-store/.../registration",
 
   "disks": [
     { "path": "/var/lib/builder/store.img", "readOnly": true },

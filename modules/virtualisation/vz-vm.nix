@@ -14,6 +14,8 @@ let
   hostPkgs = cfg.host.pkgs;
 
   regInfo = hostPkgs.closureInfo { rootPaths = cfg.additionalPaths; };
+  # Read from the erofs lower store: gc can whiteout the copy in the overlaid /nix/store.
+  regInfoPath = "/nix/.ro-store/${baseNameOf regInfo}/registration";
 
   # Host-built erofs store image, named by closure hash so only a changed guest rebuilds it.
   # A derivation is not an option: it would need the Linux builder this VM provides.
@@ -31,7 +33,7 @@ let
     # Virtualization.framework offers a virtio console
     "console=hvc0"
     "init=${toplevel}/init"
-    "regInfo=${regInfo}/registration"
+    "regInfo=${regInfoPath}"
   ]
   ++ config.boot.kernelParams;
 
@@ -277,8 +279,9 @@ in
         };
       }
       // lib.optionalAttrs (!cfg.writableStoreUseTmpfs && vzCfg.diskImage != null) {
-        # Second disk, hence /dev/vdb: store image is always first.
-        "/nix/.rw-store" = lib.mkVMOverride {
+        # Second disk, hence /dev/vdb: store image is always first. Mount all of
+        # /nix so the Nix database persists together with the writable store.
+        "/nix" = lib.mkVMOverride {
           device = "/dev/vdb";
           fsType = "ext4";
           autoFormat = true;

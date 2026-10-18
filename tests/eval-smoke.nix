@@ -60,7 +60,8 @@ let
     "boots directly from a kernel" = ''.kernel | startswith("/nix/store")'';
     "supplies an initrd" = ''.initrd | startswith("/nix/store")'';
     "uses the virtio console" = ''.cmdline | contains("console=hvc0")'';
-    "registers the closure from the command line" = ''.cmdline | contains("regInfo=")'';
+    # From the lower store: gc can whiteout the overlay's copy.
+    "registers the closure from the command line" = ''.cmdline | contains("regInfo=/nix/.ro-store/")'';
     "honours the requested cpu count" = ".cpuCount == 2";
     "honours the requested memory" = ".memorySizeMiB == 2048";
     # Inbound SSH goes over vsock: NAT leaves the guest no stable inbound address.
