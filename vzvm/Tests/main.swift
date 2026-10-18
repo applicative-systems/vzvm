@@ -8,5 +8,6 @@ signal(SIGPIPE, SIG_IGN)
 XCTMain([
   testCase(ConfigTests.allTests),
   testCase(MachineTests.allTests),
+  testCase(PreflightTests.allTests),
   testCase(VsockProxyTests.allTests),
 ])
