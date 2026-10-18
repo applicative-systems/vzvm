@@ -8,8 +8,8 @@ struct FakeError: Error {}
 final class FakeGuest: Guest {
   var canRequestStop = true
   var requestStopError: Error?
-  var socketDevice: VZVirtioSocketDevice? { nil }
   var onStop: ((Error?) -> Void)?
+  private(set) var connectedPorts: [UInt32] = []
 
   private(set) var startCompletion: ((Result<Void, Error>) -> Void)?
   private(set) var stopCompletion: ((Error?) -> Void)?
@@ -29,28 +29,62 @@ final class FakeGuest: Guest {
     forcedStops += 1
     stopCompletion = completionHandler
   }
+
+  /// Records the port; the proxy tests cover what happens to a connection.
+  func connect(
+    toPort port: UInt32, completionHandler: @escaping (Result<VsockConnection, Error>) -> Void
+  ) {
+    connectedPorts.append(port)
+    completionHandler(.failure(FakeError()))
+  }
 }
 
-/// Virtual time: nothing runs until the test advances it.
+/// Virtual time: nothing runs until the test advances it. Thread-safe, since the proxy
+/// schedules its retries from its own queues.
 final class ManualScheduler: Scheduler {
+  private let lock = NSLock()
   private var now = 0
   private var pending: [(due: Int, work: DispatchWorkItem)] = []
 
-  func schedule(after seconds: Int, _ work: DispatchWorkItem) {
-    pending.append((now + seconds, work))
+  func schedule(after delay: DispatchTimeInterval, _ work: DispatchWorkItem) {
+    lock.withLock { pending.append((now + delay.nanoseconds, work)) }
   }
 
+  var pendingCount: Int { lock.withLock { pending.filter { !$0.work.isCancelled }.count } }
+
   /// Runs everything due by then in order, including work scheduled while advancing.
-  func advance(by seconds: Int) {
-    let target = now + seconds
-    while let next = pending.indices.filter({ pending[$0].due <= target })
-      .min(by: { pending[$0].due < pending[$1].due })
-    {
-      let (due, work) = pending.remove(at: next)
-      now = due
+  func advance(by delay: DispatchTimeInterval) {
+    let target = lock.withLock { now + delay.nanoseconds }
+    while let work = nextDue(by: target) {
       if !work.isCancelled { work.perform() }
     }
-    now = target
+    lock.withLock { now = target }
+  }
+
+  /// Unlocked while the work runs: it may schedule more.
+  private func nextDue(by target: Int) -> DispatchWorkItem? {
+    lock.withLock {
+      guard
+        let next = pending.indices.filter({ pending[$0].due <= target })
+          .min(by: { pending[$0].due < pending[$1].due })
+      else { return nil }
+      let (due, work) = pending.remove(at: next)
+      now = due
+      return work
+    }
+  }
+}
+
+extension DispatchTimeInterval {
+  var nanoseconds: Int {
+    switch self {
+    case .seconds(let s): return s * 1_000_000_000
+    case .milliseconds(let ms): return ms * 1_000_000
+    case .microseconds(let us): return us * 1_000
+    case .nanoseconds(let ns): return ns
+    case .never: return .max / 2  // leaves room to add the current time
+    @unknown default: fatalError("unknown DispatchTimeInterval \(self)")
+    }
   }
 }
 
@@ -101,7 +135,14 @@ final class Harness {
     machine.terminate()
     settle()
   }
-  func advance(_ seconds: Int) { queue.sync { clock.advance(by: seconds) } }
+  func advance(_ seconds: Int) { queue.sync { clock.advance(by: .seconds(seconds)) } }
+
+  /// What the proxy would get, asked on the machine's queue as it must be.
+  func connect(toPort port: UInt32) -> Result<VsockConnection, Error>? {
+    var result: Result<VsockConnection, Error>?
+    queue.sync { machine.connect(toPort: port) { result = $0 } }
+    return result
+  }
 
   func started() { complete(guest.startCompletion, "start") { $0(.success(())) } }
   func failedToStart() { complete(guest.startCompletion, "start") { $0(.failure(FakeError())) } }

@@ -34,6 +34,8 @@ swiftPackages.stdenv.mkDerivation {
 
   doCheck = true;
   checkInputs = [ swiftPackages.XCTest ];
+  # The proxy tests listen and connect on 127.0.0.1.
+  __darwinAllowLocalNetworking = true;
 
   checkPhase = ''
     runHook preCheck

@@ -26,6 +26,7 @@ final class MachineTests: XCTestCase {
     ("testStartFailureExits", testStartFailureExits),
     ("testConfigurationFailureExits", testConfigurationFailureExits),
     ("testGuestErrorExits", testGuestErrorExits),
+    ("testConnectReachesGuestOnlyWhileRunning", testConnectReachesGuestOnlyWhileRunning),
   ]
 
   // MARK: Booting
@@ -280,5 +281,23 @@ final class MachineTests: XCTestCase {
     h.runningIdle()
     h.crashed()
     XCTAssertEqual(h.exitCodes, [ExitCode.guestError])
+  }
+
+  // MARK: Vsock
+
+  /// A starting or stopping guest must not be handed connections: the proxy retries instead.
+  func testConnectReachesGuestOnlyWhileRunning() {
+    let h = Harness(idleTimeoutSeconds: 60)
+    h.launch()
+    h.open()
+    XCTAssertNil(try? h.connect(toPort: 22)?.get())
+    XCTAssertEqual(h.guest.connectedPorts, [])
+    h.started()
+    _ = h.connect(toPort: 22)
+    XCTAssertEqual(h.guest.connectedPorts, [22])
+    h.close()
+    h.advance(60)
+    XCTAssertNil(try? h.connect(toPort: 22)?.get())
+    XCTAssertEqual(h.guest.connectedPorts, [22])
   }
 }
