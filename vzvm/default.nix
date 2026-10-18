@@ -14,6 +14,7 @@ swiftPackages.stdenv.mkDerivation {
     fileset = lib.fileset.unions [
       ./Package.swift
       ./Sources
+      ./Tests
     ];
   };
 
@@ -29,6 +30,22 @@ swiftPackages.stdenv.mkDerivation {
     swiftc -O -o vzvm Sources/vzvm/*.swift
 
     runHook postBuild
+  '';
+
+  doCheck = true;
+  checkInputs = [ swiftPackages.XCTest ];
+
+  checkPhase = ''
+    runHook preCheck
+
+    swiftc -o vzvm-tests \
+      $(find Sources/vzvm -name '*.swift' ! -name main.swift) Tests/*.swift \
+      -lXCTest -Xlinker -rpath -Xlinker ${swiftPackages.XCTest}/lib/swift/macosx
+    # Some nixpkgs revisions give libXCTest an absolute install name pointing at lib/
+    # instead of @rpath, so the rpath above is not consulted.
+    DYLD_LIBRARY_PATH=${swiftPackages.XCTest}/lib/swift/macosx ./vzvm-tests
+
+    runHook postCheck
   '';
 
   installPhase = ''

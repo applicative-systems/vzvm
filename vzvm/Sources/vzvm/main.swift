@@ -49,8 +49,18 @@ do {
   fail("invalid VM configuration: \(error.localizedDescription)", code: ExitCode.config)
 }
 
+let vmQueue = DispatchQueue(label: "vzvm.vm")
+// The validated configuration serves the first boot; later on-demand boots build their own.
+var firstConfiguration: VZVirtualMachineConfiguration? = vmConfiguration
 let machine = Machine(
-  config: config, configuration: vmConfiguration, queue: DispatchQueue(label: "vzvm.vm"))
+  idleTimeoutSeconds: config.idleTimeoutSeconds,
+  queue: vmQueue,
+  makeGuest: {
+    let configuration = try firstConfiguration ?? VirtualMachineBuilder.build(config)
+    firstConfiguration = nil
+    return VZGuest(configuration: configuration, queue: vmQueue)
+  },
+  finish: { Runner.shared.finish($0) })
 
 /// Owns process exit, so signals, guest poweroff and start failures converge on one path.
 final class Runner {
