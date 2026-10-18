@@ -3,9 +3,11 @@
   darwin,
   swift,
   swiftPackages,
+  runCommand,
+  jq,
 }:
 
-swiftPackages.stdenv.mkDerivation {
+swiftPackages.stdenv.mkDerivation (finalAttrs: {
   pname = "vzvm";
   version = "1.1.0";
 
@@ -14,7 +16,7 @@ swiftPackages.stdenv.mkDerivation {
     fileset = lib.fileset.unions [
       ./Package.swift
       ./Sources
-      ./Tests
+      (lib.fileset.fileFilter (file: file.hasExt "swift") ./Tests)
     ];
   };
 
@@ -63,6 +65,20 @@ swiftPackages.stdenv.mkDerivation {
     codesign --entitlements ${./vzvm.entitlements} -f -s - $out/bin/vzvm
   '';
 
+  passthru.tests = {
+    # The signed binary as installed: exit codes, signals, listener takeover. No guest boots.
+    cli =
+      runCommand "vzvm-cli-test"
+        {
+          nativeBuildInputs = [ jq ];
+          __darwinAllowLocalNetworking = true;
+        }
+        ''
+          bash ${./Tests/cli.sh} ${lib.getExe finalAttrs.finalPackage}
+          touch $out
+        '';
+  };
+
   meta = {
     description = "Minimal Linux VM monitor built on Apple's Virtualization.framework";
     longDescription = ''
@@ -80,4 +96,4 @@ swiftPackages.stdenv.mkDerivation {
     sourceProvenance = [ lib.sourceTypes.fromSource ];
     mainProgram = "vzvm";
   };
-}
+})
