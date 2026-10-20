@@ -21,6 +21,18 @@ enum VirtualMachineBuilder {
         "memorySizeMiB \(config.memorySizeMiB) outside supported range \(minMiB)..\(maxMiB)")
     }
 
+    if let idle = config.idleTimeoutSeconds {
+      // The upper bound keeps timer arithmetic far from Int.max.
+      guard (1...Config.maxIdleTimeoutSeconds).contains(idle) else {
+        throw VZVMError.config(
+          "idleTimeoutSeconds must be between 1 and \(Config.maxIdleTimeoutSeconds)")
+      }
+      // Only a forwarded connection boots an on-demand guest.
+      guard !config.vsock.forwards.isEmpty else {
+        throw VZVMError.config("idleTimeoutSeconds needs at least one vsock forward")
+      }
+    }
+
     try checkKernel(config.kernel)
 
     guard FileManager.default.fileExists(atPath: config.initrd) else {
