@@ -34,8 +34,6 @@
       packages.${system} = {
         default = pkgs.vzvm;
         inherit (pkgs) vzvm;
-        # The installed binary: exit codes, signals, port takeover. No guest boots.
-        vzvm-cli = pkgs.vzvm.tests.cli;
         inherit (pkgs.darwin) linux-builder-vz;
 
         # `nix run .#benchmark-full` -- the whole A/B session in one command.
