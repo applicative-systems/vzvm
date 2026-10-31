@@ -83,6 +83,14 @@ is specific to your configuration, and even that is cheap.
 Everything else about `nix.linux-builder` behaves as before: `maxJobs`, `ephemeral`,
 `workingDirectory`, `config`, port 31022, the committed host key.
 
+One thing differs: the guest runs on demand. `vzvm` stays up and listens on port 31022, boots
+the guest on the first connection (~12s, which that build waits out) and powers it off after
+30 minutes without one, giving its RAM back to the host. Tune or disable it:
+
+```nix
+nix.linux-builder.config.virtualisation.vz.idleTimeout = null; # always on; or seconds
+```
+
 To let the builder run NixOS integration tests, enable nested virtualization and advertise
 the features (needs macOS 15+ and an M3 or newer chip):
 
@@ -269,7 +277,8 @@ will be simpler to use and far better documented for it.
   "rosetta": true,
   "nestedVirtualization": false,
   "vsock": { "forwards": [{ "listen": "127.0.0.1:31022", "vsockPort": 22 }] },
-  "console": { "mode": "stdio" }
+  "console": { "mode": "stdio" },
+  "idleTimeoutSeconds": 1800
 }
 ```
 
@@ -282,6 +291,10 @@ writable.
 Notes:
 
 - `disks` map positionally onto `/dev/vda`, `/dev/vdb`, ... Order is significant.
+- `idleTimeoutSeconds` (1 to 604800) runs the guest on demand: it boots on the first
+  connection to a `vsock.forwards` listener, which is held until the guest answers, and
+  stops after that many seconds without one. Requires at least one forward. Omit it to run
+  the guest for as long as `vzvm` runs.
 - A disk whose _contents_ are a QEMU qcow2 is rejected — the check reads magic bytes, not the
   name. The `.qcow2` path above is a raw disk keeping that filename because nix-darwin's
   `ephemeral` expects it; this catches genuine leftovers from `darwin.linux-builder`.
@@ -339,8 +352,8 @@ nix.linux-builder.config = {
 | 71   | guest stopped with an error                                        |
 | 78   | configuration error                                                |
 
-A malformed `vsock.forwards` listen address is reported as 70, not 78 — it is only detected
-once the proxies start, after preflight.
+A malformed `vsock.forwards` listen address is still a configuration error (78), although it
+is only detected once the proxies start, after preflight.
 
 ## Troubleshooting
 
@@ -388,7 +401,6 @@ retired, these could go:
 | The data disk is a raw image named `nixos.qcow2`, and vzvm sniffs qcow2 magic bytes | `ephemeral` deletes exactly `${workingDirectory}/${hostName}.qcow2`                    | Honest filenames (`store.img`, `data.img`) and no magic-byte check                                                                                          |
 | The backend is chosen by `nix.linux-builder.package`                                | It is the only seam nix-darwin offers                                                  | A declarative `backend = "vz";` with real assertions — today nothing checks the host is `aarch64-darwin` until the VM refuses to start                      |
 | `virtualisation.darwin-builder.*` and an option tree shaped around `qemu-vm.nix`    | The builder profile is vendored near-verbatim so the upstream diff reads as a refactor | One coherent `virtualisation.vz` option set, with guest resources described once                                                                            |
-| launchd keeps the VM resident via `KeepAlive`, idle or not                          | That is how the QEMU builder behaves                                                   | Start the guest on the first connection, stop it after an idle timeout — only possible once the transport is ours                                           |
 | Exactly one guest                                                                   | `nix.linux-builder` models one builder                                                 | Several — a nested-virt one for `nixosTests` beside a plain one — or per-project ephemeral guests                                                           |
 
 The first row has been prototyped, and it is worth recording that the obvious approach does

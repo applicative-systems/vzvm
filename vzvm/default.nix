@@ -3,17 +3,20 @@
   darwin,
   swift,
   swiftPackages,
+  runCommand,
+  jq,
 }:
 
-swiftPackages.stdenv.mkDerivation {
+swiftPackages.stdenv.mkDerivation (finalAttrs: {
   pname = "vzvm";
-  version = "1.0.0";
+  version = "1.1.0";
 
   src = lib.fileset.toSource {
     root = ./.;
     fileset = lib.fileset.unions [
       ./Package.swift
       ./Sources
+      (lib.fileset.fileFilter (file: file.hasExt "swift") ./Tests)
     ];
   };
 
@@ -31,6 +34,22 @@ swiftPackages.stdenv.mkDerivation {
     runHook postBuild
   '';
 
+  doCheck = true;
+  # The proxy tests listen and connect on 127.0.0.1.
+  __darwinAllowLocalNetworking = true;
+
+  checkPhase = ''
+    runHook preCheck
+
+    # libXCTest finds the system's Concurrency runtime via @rpath, but sets no rpath itself.
+    swiftc -o vzvm-tests \
+      $(find Sources/vzvm -name '*.swift' ! -name main.swift) Tests/*.swift \
+      -Xlinker -rpath -Xlinker /usr/lib/swift
+    ./vzvm-tests
+
+    runHook postCheck
+  '';
+
   installPhase = ''
     runHook preInstall
 
@@ -43,6 +62,20 @@ swiftPackages.stdenv.mkDerivation {
   postFixup = ''
     codesign --entitlements ${./vzvm.entitlements} -f -s - $out/bin/vzvm
   '';
+
+  passthru.tests = {
+    # The signed binary as installed: exit codes, signals, listener takeover. No guest boots.
+    cli =
+      runCommand "vzvm-cli-test"
+        {
+          nativeBuildInputs = [ jq ];
+          __darwinAllowLocalNetworking = true;
+        }
+        ''
+          bash ${./Tests/cli.sh} ${lib.getExe finalAttrs.finalPackage}
+          touch $out
+        '';
+  };
 
   meta = {
     description = "Minimal Linux VM monitor built on Apple's Virtualization.framework";
@@ -61,4 +94,4 @@ swiftPackages.stdenv.mkDerivation {
     sourceProvenance = [ lib.sourceTypes.fromSource ];
     mainProgram = "vzvm";
   };
-}
+})
