@@ -13,13 +13,18 @@
 state=${VZVM_LIFECYCLE_STATE:-${XDG_CACHE_HOME:-$HOME/.cache}/vzvm-lifecycle-test}
 mkdir -p "$state/keys"
 cd "$state" || exit 1
-rm -f nixos.qcow2 vzvm.log
-[ -f keys/builder_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f keys/builder_ed25519
 
-if (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
+vzvm_pid() { pgrep -f "bin/vzvm $state/vzvm.json" || true; }
+
+# Before touching any state: it may belong to a run in progress. Looks for the process
+# first, since a probing connection would boot that run's guest.
+if [ -n "$(vzvm_pid)" ] || (exec 3<>"/dev/tcp/127.0.0.1/$port") 2>/dev/null; then
   echo "127.0.0.1:$port is in use; is another test still running?" >&2
   exit 1
 fi
+
+rm -f nixos.qcow2 vzvm.log
+[ -f keys/builder_ed25519 ] || ssh-keygen -q -t ed25519 -N "" -f keys/builder_ed25519
 
 log=$state/vzvm.log
 failures=0
@@ -28,8 +33,6 @@ fail() {
   echo "FAIL: $1" >&2
   failures=$((failures + 1))
 }
-
-vzvm_pid() { pgrep -f "bin/vzvm $state/vzvm.json" || true; }
 
 cleanup() {
   local pid
