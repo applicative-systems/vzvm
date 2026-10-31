@@ -26,6 +26,9 @@ final class MachineTests: XCTestCase {
     ("testStartFailureExits", testStartFailureExits),
     ("testConfigurationFailureExits", testConfigurationFailureExits),
     ("testGuestErrorExits", testGuestErrorExits),
+    ("testStaleStopErrorSparesNewGuest", testStaleStopErrorSparesNewGuest),
+    ("testStaleCrashSparesNewGuest", testStaleCrashSparesNewGuest),
+    ("testStaleStartFailureSparesNewGuest", testStaleStartFailureSparesNewGuest),
     ("testConnectReachesGuestOnlyWhileRunning", testConnectReachesGuestOnlyWhileRunning),
   ]
 
@@ -281,6 +284,47 @@ final class MachineTests: XCTestCase {
     h.runningIdle()
     h.crashed()
     XCTAssertEqual(h.exitCodes, [ExitCode.guestError])
+  }
+
+  // MARK: Replaced guests
+
+  /// The forced stop lost the race against a poweroff, and a waiting connection has booted
+  /// the next guest by the time the stop reports its failure.
+  func testStaleStopErrorSparesNewGuest() {
+    let h = Harness(idleTimeoutSeconds: 60)
+    h.runningIdle()
+    h.advance(60)
+    h.open()
+    h.advance(Machine.stopGraceSeconds)
+    let old = h.guest
+    XCTAssertEqual(old.forcedStops, 1)
+    h.poweredOff()
+    XCTAssertEqual(h.guests.count, 2)
+    h.queue.sync { old.stopCompletion?(FakeError()) }
+    XCTAssertEqual(h.exitCodes, [])
+  }
+
+  func testStaleCrashSparesNewGuest() {
+    let h = Harness(idleTimeoutSeconds: 60)
+    h.runningIdle()
+    h.advance(60)
+    h.open()
+    let old = h.guest
+    h.poweredOff()
+    XCTAssertEqual(h.guests.count, 2)
+    h.queue.sync { old.onStop?(FakeError()) }
+    XCTAssertEqual(h.exitCodes, [])
+  }
+
+  func testStaleStartFailureSparesNewGuest() {
+    let h = Harness(idleTimeoutSeconds: 60)
+    h.launch()
+    h.open()
+    let old = h.guest
+    h.poweredOff()
+    XCTAssertEqual(h.guests.count, 2)
+    h.queue.sync { old.startCompletion?(.failure(FakeError())) }
+    XCTAssertEqual(h.exitCodes, [])
   }
 
   // MARK: Vsock

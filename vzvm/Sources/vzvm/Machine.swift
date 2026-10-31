@@ -103,13 +103,14 @@ final class Machine {
       return
     }
     guest.onStop = { [weak self, unowned guest] error in
-      guard let self else { return }
+      // Callbacks of a replaced guest must not act on its successor, here and below.
+      guard let self, self.guest === guest else { return }
       if let error {
         Log.error("guest stopped: \(error.localizedDescription)")
         self.finish(ExitCode.guestError)
       } else {
         Log.info("guest powered off")
-        self.guestStopped(guest)
+        self.guestStopped()
       }
     }
     self.guest = guest
@@ -131,6 +132,7 @@ final class Machine {
         // The connection that woke us may have given up during boot.
         self.armIdleTimer()
       case .failure(let error):
+        guard self.guest === guest else { return }
         Log.error("failed to start guest: \(error.localizedDescription)")
         self.finish(ExitCode.runtime)
       }
@@ -193,8 +195,9 @@ final class Machine {
 
   private func forceStop(_ guest: Guest) {
     guest.stop { error in
+      guard self.guest === guest else { return }
       guard let error else {
-        self.guestStopped(guest)
+        self.guestStopped()
         return
       }
       Log.error("cannot stop guest: \(error.localizedDescription)")
@@ -202,9 +205,8 @@ final class Machine {
     }
   }
 
-  private func guestStopped(_ stopped: Guest) {
+  private func guestStopped() {
     dispatchPrecondition(condition: .onQueue(queue))
-    guard guest === stopped else { return }
     guest = nil
     state = .stopped
     idleTimer?.cancel()
