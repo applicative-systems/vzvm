@@ -35,19 +35,17 @@ swiftPackages.stdenv.mkDerivation (finalAttrs: {
   '';
 
   doCheck = true;
-  checkInputs = [ swiftPackages.XCTest ];
   # The proxy tests listen and connect on 127.0.0.1.
   __darwinAllowLocalNetworking = true;
 
   checkPhase = ''
     runHook preCheck
 
+    # libXCTest finds the system's Concurrency runtime via @rpath, but sets no rpath itself.
     swiftc -o vzvm-tests \
       $(find Sources/vzvm -name '*.swift' ! -name main.swift) Tests/*.swift \
-      -lXCTest -Xlinker -rpath -Xlinker ${swiftPackages.XCTest}/lib/swift/macosx
-    # Some nixpkgs revisions give libXCTest an absolute install name pointing at lib/
-    # instead of @rpath, so the rpath above is not consulted.
-    DYLD_LIBRARY_PATH=${swiftPackages.XCTest}/lib/swift/macosx ./vzvm-tests
+      -Xlinker -rpath -Xlinker /usr/lib/swift
+    ./vzvm-tests
 
     runHook postCheck
   '';
