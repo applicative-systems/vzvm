@@ -140,7 +140,8 @@ enum VirtualMachineBuilder {
       let attachment = try VZDiskImageStorageDeviceAttachment(
         url: URL(fileURLWithPath: disk.path),
         readOnly: disk.readOnly,
-        cachingMode: .automatic,
+        // Automatic caching can corruct disk images.
+        cachingMode: .cached,
         synchronizationMode: disk.readOnly ? .none : .fsync)
       return VZVirtioBlockDeviceConfiguration(attachment: attachment)
     }
