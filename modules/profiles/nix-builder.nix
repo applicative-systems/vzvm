@@ -200,7 +200,16 @@ in
         run-builder = hostPkgs.writeShellScriptBin "run-builder" ''
           set -euo pipefail
           KEYS="''${KEYS:-./keys}"
-          KEYS="$(${hostPkgs.nix}/bin/nix-store --add "$KEYS")" ${lib.getExe config.system.build.vm}
+
+          temporaryDirectory="$(${hostPkgs.coreutils}/bin/mktemp -d)"
+          trap '${hostPkgs.coreutils}/bin/rm -rf "$temporaryDirectory"' EXIT
+
+          # Stage only the public key outside the store so GC cannot remove it.
+          ${hostPkgs.coreutils}/bin/install -Dm444 \
+            "$KEYS/${user}_${keyType}.pub" \
+            "$temporaryDirectory/keys/${user}_${keyType}.pub"
+
+          KEYS="$temporaryDirectory/keys" ${lib.getExe config.system.build.vm}
         '';
 
       in
